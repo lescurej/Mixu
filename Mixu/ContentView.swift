@@ -12,6 +12,8 @@
 
 import os.log
 import SwiftUI
+import AVFoundation
+import CoreAudio
 
 // MARK: - Logging
 let log = OSLog(subsystem: "com.example.LoopbackRouter", category: "audio")
@@ -37,8 +39,13 @@ struct ContentView: View {
             PatchbayView(engine: engine)
         }
         .padding(16)
-        .frame(minWidth: 680, minHeight: 480)
     }
+}
+
+#Preview {
+    ContentView()
+    .frame(width: 1200, height: 800)
+
 }
 
 

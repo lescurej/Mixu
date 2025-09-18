@@ -29,7 +29,8 @@ struct DeviceBoxView: View {
     @Binding var device: DeviceBox
     @Binding var draggingFrom: UUID?
     @Binding var tempPoint: CGPoint
-    var onDropFrom: (UUID, CGPoint) -> Void
+    var onDrag: (DeviceBox, UUID, CGPoint) -> Void
+    var onRelease: (DeviceBox, UUID, CGPoint) -> Void
 
     var body: some View {
         ZStack {
@@ -40,73 +41,75 @@ struct DeviceBoxView: View {
             // Name
             Text(device.name)
                 .font(.caption)
+                .frame(maxWidth: device.size.width*0.5)
                 .fontWeight(.semibold)
                 .foregroundColor(.white)
+                .multilineTextAlignment(.center)
                 .padding(4)
 
             // Ports
             ForEach(device.ports) { port in
-                PortView(port: port, deviceSize: device.size) { portId, location in
-                    onDropFrom(portId, location)
-                }
+                PortView(port: port,
+                         deviceSize: device.size,
+                         onDrag: { portId, location in
+                    onDrag(device, portId, location)},
+                         onReleased: { portId, location in
+                    onRelease(device, portId, location)}
+                )
             }
         }
         .frame(width: device.size.width, height: device.size.height)
-        .position(x: device.origin.x + device.size.width/2,
-                  y: device.origin.y + device.size.height/2)
     }
 }
+
+let hoveredCircleSize = CGFloat(15)
+let normalCircleSize = CGFloat(12)
+
 struct PortView: View {
     let port: Port
     let deviceSize: CGSize
-    let onDrop: (UUID, CGPoint) -> Void
+    let onDrag: (UUID, CGPoint) -> Void
+    let onReleased: (UUID, CGPoint) -> Void
     
-    @State private var isDragging = false
     @State private var globalPosition: CGPoint = .zero
+    @State private var hovered: Bool = false
     
     var body: some View {
-        HStack(spacing: 4) {
-            if port.isInput {
-                Text(port.name)
-                    .font(.system(size: 10))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: deviceSize.width * 0.6, alignment: .trailing)
-                Circle()
-                    .fill(.green)
-                    .frame(width: 12, height: 12)
-                    .background(PortPositionReader())
-            } else {
-                Circle()
-                    .fill(.blue)
-                    .frame(width: 12, height: 12)
-                    .background(PortPositionReader())
-                Text(port.name)
-                    .font(.system(size: 10))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: deviceSize.width * 0.6, alignment: .leading)
-            }
+        ZStack {
+            // Port circle with position reader
+            Circle()
+                .fill(port.isInput ? .green : .blue)
+                .frame(width: hovered ? hoveredCircleSize : normalCircleSize , height: hovered ? hoveredCircleSize : normalCircleSize)
+                .background(PortPositionReader())
+                .position(
+                    x: port.isInput ? 0 : deviceSize.width ,
+                    y: port.local.y
+                )
+                .onHover(perform: {hovered in self.hovered = hovered})
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("patch"))
+                        .onChanged { value in
+                            onDrag(port.id, value.location)
+                        }
+                        .onEnded { value in
+                            onReleased(port.id, value.location)
+                        }
+                )
+                
+            
+            // Port label
+            Text(port.name)
+                .font(.system(size: 10))
+                .fontWeight(.thin)
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .multilineTextAlignment(port.isInput ? .leading : .trailing )
+                .frame(width: 100.0)
+                .position(
+                    x: port.isInput ? 20: deviceSize.width - 20,
+                    y: port.local.y
+                )
         }
-        .position(
-            x: port.isInput ? deviceSize.width - 68 : 68,
-            y: port.local.y
-        )
-        .gesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .named("patch"))
-                .onChanged { value in
-                    isDragging = true
-                    onDrop(port.id, value.location)
-                }
-                .onEnded { value in
-                    isDragging = false
-                    onDrop(port.id, value.location)
-                }
-        )
     }
 }
 
@@ -129,6 +132,12 @@ struct PortPositionPreferenceKey: PreferenceKey {
         value.append(contentsOf: nextValue())
     }
 }
+
+extension CGRect {
+    var center: CGPoint {
+        CGPoint(x: midX, y: midY)
+    }
+}
 // MARK: - Preview
 
 #Preview {
@@ -147,7 +156,8 @@ struct PortPositionPreferenceKey: PreferenceKey {
         )),
         draggingFrom: .constant(nil),
         tempPoint: .constant(.zero),
-        onDropFrom: { _, _ in }
+        onDrag: { device, _, _ in },
+        onRelease: { device, _, _ in },
     )
     .frame(width: 400, height: 300)
     .background(Color.black)

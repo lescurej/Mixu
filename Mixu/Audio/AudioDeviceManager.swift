@@ -86,27 +86,15 @@ final class AudioDeviceManager {
     }
     
     func deviceID(forUID uid: String) -> AudioDeviceID? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDeviceForUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var devID = AudioDeviceID(0)
-        let uidStr = uid as CFString
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        
-        let status = withUnsafePointer(to: uidStr) { uidPtr in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &addr,
-                1,
-                uidPtr,
-                &size,
-                &devID
-            )
+        // Direct approach: just search through all devices
+        // This is more reliable than the Core Audio UID lookup API
+        if let device = allDevices().first(where: { $0.uid == uid }) {
+            print("✅ Found device directly: \(device.name) (ID: \(device.id))")
+            return device.id
         }
         
-        return (status == noErr) ? devID : nil
+        print("❌ Device not found for UID: \(uid)")
+        return nil
     }
 }
 

@@ -25,6 +25,8 @@ final class OutputSink {
     private let targetFill: Double = 0.5 // 50% full
     private let kp: Double = 50.0       // proportional gain → adjust as needed (ppm per unit error)
 
+    private var renderCount = 0
+
     init(deviceID: AudioDeviceID, inFormat: StreamFormat, outFormat: StreamFormat, ring: AudioRingBuffer) throws {
         self.deviceID = deviceID
         self.inFormat = inFormat
@@ -83,76 +85,75 @@ final class OutputSink {
         converter.sampleRateConverterQuality = .max
     }
 
+    // Add more detailed logging to the OutputSink
     private func renderOutput(inNumberFrames: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
-        guard let converter = converter else { return noErr }
-
-        // Adjust SRC rate slightly based on ring fill (simple PLL)
-        let error = ring.fillLevel() - targetFill
-        let ppm = kp * error
-        if abs(ppm - correctionPPM) > 1.0 { // avoid thrashing; 1 ppm threshold
-            correctionPPM = ppm
-            let ratio = (outFormat.asbd.mSampleRate * (1.0 + correctionPPM / 1_000_000.0)) / inFormat.asbd.mSampleRate
-            // Undocumented but widely used KVC to steer converter rate a few ppm
-            converter.setValue(ratio, forKey: "sampleRateConverterRate")
+        // Get buffer list for easier access
+        let buffers = UnsafeMutableAudioBufferListPointer(ioData)
+        
+        // Log buffer details
+        print("🔍 OutputSink renderOutput called:")
+        print("  - Number of frames: \(inNumberFrames)")
+        print("  - Number of buffers: \(buffers.count)")
+        for i in 0..<buffers.count {
+            print("  - Buffer \(i): \(buffers[i].mNumberChannels) channels, \(buffers[i].mDataByteSize) bytes")
         }
-
-        // Pull from ring buffer
-        let framesNeeded = Int(inNumberFrames)
-        let channels = Int(inFormat.asbd.mChannelsPerFrame)
-        let tmp = UnsafeMutablePointer<Float>.allocate(capacity: framesNeeded * channels)
-        let pulled = ring.read(into: tmp, frames: framesNeeded)
-
-        let inAVFormat = AVAudioFormat(streamDescription: &inFormat.asbd)!
-        let srcBuffer = AVAudioPCMBuffer(pcmFormat: inAVFormat, frameCapacity: AVAudioFrameCount(pulled))!
-        srcBuffer.frameLength = AVAudioFrameCount(pulled)
-        // Interleaved float: single pointer with all samples
-        srcBuffer.floatChannelData!.pointee.update(from: tmp, count: pulled * channels)
-        tmp.deallocate()
-
-        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-            if srcBuffer.frameLength == 0 {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            outStatus.pointee = .haveData
-            return srcBuffer
-        }
-
-        // Destination buffer
-        let dstFormat = AVAudioFormat(streamDescription: &outFormat.asbd)!
-        let dst = AVAudioPCMBuffer(pcmFormat: dstFormat, frameCapacity: AVAudioFrameCount(inNumberFrames))!
-
-        var convError: NSError?
-        let status = converter.convert(to: dst, error: &convError, withInputFrom: inputBlock)
-
-        if status != .haveData || convError != nil {
-            os_log("Converter error: %{public}@", log: log, type: .error, String(describing: convError))
-            // Output silence
-            let buffers = UnsafeMutableAudioBufferListPointer(ioData)
+        
+        // Check if ring buffer has data
+        let fillLevel = ring.fillLevel()
+        print("  - Ring buffer fill level: \(fillLevel)")
+        
+        if fillLevel == 0.0 {
+            // Output silence if no data available
             for i in 0..<buffers.count {
                 memset(buffers[i].mData, 0, Int(buffers[i].mDataByteSize))
             }
             return noErr
         }
 
-        // Copy dst into ioData (handle interleaved vs non-interleaved)
-        let buffers = UnsafeMutableAudioBufferListPointer(ioData)
-        let outFrames = Int(dst.frameLength)
-        let outCh = Int(outFormat.asbd.mChannelsPerFrame)
+        // Pull from ring buffer
+        let framesNeeded = Int(inNumberFrames)
+        let channels = Int(inFormat.asbd.mChannelsPerFrame)
+        let tmp = UnsafeMutablePointer<Float>.allocate(capacity: framesNeeded * channels)
+        defer { tmp.deallocate() }
+        
+        let pulled = ring.read(into: tmp, frames: framesNeeded)
+        
+        print("  - Pulled \(pulled) frames from ring buffer")
+        
+        if pulled == 0 {
+            // Output silence if no data pulled
+            for i in 0..<buffers.count {
+                memset(buffers[i].mData, 0, Int(buffers[i].mDataByteSize))
+            }
+            return noErr
+        }
 
-        if buffers.count == 1 {
-            // Interleaved into a single buffer
-            let dstPtr = dst.floatChannelData!.pointee
-            let bytes = outFrames * outCh * MemoryLayout<Float>.size
-            memcpy(buffers[0].mData, dstPtr, bytes)
-            buffers[0].mDataByteSize = UInt32(bytes)
+        // Check if output is interleaved or non-interleaved
+        let isOutputInterleaved = buffers.count == 1 && buffers[0].mNumberChannels > 1
+        print("  - Output format is \(isOutputInterleaved ? "interleaved" : "non-interleaved")")
+        
+        if isOutputInterleaved {
+            // For interleaved output, copy directly
+            let bytesPerFrame = 4 * channels  // 4 bytes per sample (32-bit float) * channels
+            let bytesToCopy = min(Int(buffers[0].mDataByteSize), pulled * bytesPerFrame)
+            
+            print("  - Copying \(bytesToCopy) bytes directly to interleaved output buffer")
+            
+            if let mData = buffers[0].mData {
+                memcpy(mData, tmp, bytesToCopy)
+            }
         } else {
-            // Non-interleaved: copy channel by channel
-            let framesBytes = outFrames * MemoryLayout<Float>.size
-            for ch in 0..<min(buffers.count, outCh) {
-                if let chPtr = dst.floatChannelData?[ch] {
-                    memcpy(buffers[ch].mData, chPtr, framesBytes)
-                    buffers[ch].mDataByteSize = UInt32(framesBytes)
+            // For non-interleaved output, de-interleave our data
+            print("  - De-interleaving data to \(buffers.count) output buffers")
+            
+            for ch in 0..<min(channels, buffers.count) {
+                if let mData = buffers[ch].mData {
+                    let outBuffer = mData.assumingMemoryBound(to: Float.self)
+                    
+                    // Copy each channel
+                    for frame in 0..<pulled {
+                        outBuffer[frame] = tmp[frame * channels + ch]
+                    }
                 }
             }
         }
@@ -160,6 +161,18 @@ final class OutputSink {
         return noErr
     }
 
-    func start() { if let u = unit { check(AudioOutputUnitStart(u), "Start output AUHAL") } }
-    func stop()  { if let u = unit { check(AudioOutputUnitStop(u),  "Stop output AUHAL") } }
+    func start() {
+        guard let unit = unit else { return }
+        let status = AudioOutputUnitStart(unit)
+        print("🔊 Starting output device: status = \(status)")
+        if status != noErr {
+            print("❌ Failed to start output device: \(status)")
+        }
+    }
+
+    func stop() {
+        guard let unit = unit else { return }
+        let status = AudioOutputUnitStop(unit)
+        print("🔇 Stopping output device: status = \(status)")
+    }
 }

@@ -42,6 +42,12 @@ final class AudioRingBuffer {
             writeIndex = (writeIndex + n) % cap
         }
         availableFrames = min(capacityFrames, availableFrames + frames)
+        
+        // Debug: Log when audio data is written
+        if frames > 0 {
+            print("�� Ring buffer: wrote \(frames) frames, fill level: \(Double(availableFrames) / Double(capacityFrames))")
+        }
+        
         lock.unlock()
     }
 
@@ -72,6 +78,11 @@ final class AudioRingBuffer {
         if framesToRead < frames {
             let deficit = (frames - framesToRead) * channels
             memset(output.advanced(by: samplesToRead), 0, deficit * MemoryLayout<Float>.size)
+        }
+
+        // Debug: Log when audio data is read
+        if framesToRead > 0 {
+            print("📖 Ring buffer: read \(framesToRead) frames, fill level: \(Double(availableFrames) / Double(capacityFrames))")
         }
 
         lock.unlock()

@@ -211,24 +211,24 @@ struct PatchbayView: View {
         }
                 
         // Add passthru device
-        let passthru = engine.getPassThru()
+        let passThru = engine.passThruDevice()
         var passthruPorts: [Port] = []
         // Add input ports for passthru
-        for i in 0..<passthru.numInputs {
+        for i in 0..<(passThru?.numInputs ?? 0) {
             let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "In \(i+1)", isInput: true, uid: passthru.uid, local: CGPoint(x: 120, y: yPos)))
+            passthruPorts.append(Port(name: "In \(i+1)", isInput: true, uid: passThru?.uid, local: CGPoint(x: 120, y: yPos)))
         }
         
         // Add output ports for passthru
-        for i in 0..<passthru.numOutputs {
+        for i in 0..<(passThru?.numOutputs ?? 0) {
             let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "Out \(i+1)", isInput: false, uid: passthru.uid, local: CGPoint(x: 0, y: yPos)))
+            passthruPorts.append(Port(name: "Out \(i+1)", isInput: false, uid: passThru?.uid, local: CGPoint(x: 0, y: yPos)))
         }
         
         self.passThruDevice.append(DeviceBox(
-            name: passthru.name,
-            uid: passthru.uid,
-            size: CGSize(width: deviceWidth, height: (max(CGFloat(passthru.numInputs),CGFloat(passthru.numOutputs)) * 30.0 + 50.0)),
+            name: passThru?.name ?? "None",
+            uid: passThru?.uid,
+            size: CGSize(width: deviceWidth, height: (max(CGFloat(passThru?.numInputs ?? 0),CGFloat(passThru?.numOutputs ?? 0)) * 30.0 + 50.0)),
             origin: CGPoint(x: 0, y: 0),
             ports: passthruPorts,
             type: .passthru
@@ -374,7 +374,7 @@ struct PatchbayView: View {
                 } else if deviceBox.type == .output {
                     return engine.availableOutputs().first { $0.name == deviceBox.name }
                 } else if deviceBox.type == .passthru {
-                    return engine.getPassThru()
+                    return engine.passThruDevice()
                 }
             }
         }
@@ -441,7 +441,7 @@ final class MockRouterEngine: RouterEngine {
         ]
     }
     
-    override func getPassThru() -> AudioDevice {
+   override func passThruDevice() -> AudioDevice {
         AudioDevice(id: 5, name: "BlackHole 16ch", uid: "bh", numOutputs: 16, numInputs: 16)
     }
 }

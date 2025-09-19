@@ -137,17 +137,31 @@ private extension RouterEngine {
     func ensureDestination(uid: String) -> AudioDestination? {
         if let existing = destinations[uid] { return existing }
 
+        // Validate device exists and is accessible
+        guard deviceManager.validateDevice(uid: uid) else {
+            print("❌ Device validation failed for \(uid)")
+            return nil
+        }
+
         guard let deviceID = deviceManager.deviceID(forUID: uid) else {
             print("Destination device not found for UID \(uid)")
             return nil
         }
 
-        do {
-            let destination = try AudioDestination(uid: uid, deviceID: deviceID, format: canonicalFormat)
-            destinations[uid] = destination
-            return destination
-        } catch {
-            print("Destination creation failed for \(uid): \(error)")
+        // Instead of using a fixed format, get the device's native format
+        if let nativeFormat = deviceManager.getDeviceFormat(deviceID: deviceID) {
+            
+            print("Using native format for BlackHole device")
+            do {
+                let destination = try AudioDestination(uid: "BlackHole64ch_UID", deviceID: deviceID, format: nativeFormat)
+                destinations[uid] = destination
+                return destination
+            } catch {
+                print("Failed to create destination for \(uid): \(error)")
+                return nil
+            }
+        } else {
+            print("Failed to get device or format for BlackHole64ch_UID")
             return nil
         }
     }

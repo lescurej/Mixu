@@ -11,7 +11,7 @@ import os.lock
 
 final class AudioDestination {
     let uid: String
-    private let sink: OutputSink
+    private var sink: OutputSink?
     private let format: StreamFormat
     private let lock = OSAllocatedUnfairLock()
 
@@ -20,18 +20,31 @@ final class AudioDestination {
     init(uid: String, deviceID: AudioDeviceID, format: StreamFormat) throws {
         self.uid = uid
         self.format = format
-        self.sink = try OutputSink(deviceID: deviceID, internalFormat: format) { [weak self] bufferList, frameCapacity in
-            guard let self else { return 0 }
-            return self.render(into: bufferList, frameCapacity: frameCapacity)
+
+        print("Creating destination for device: \(deviceID)")
+        print("Format: sampleRate=\(format.asbd.mSampleRate), channels=\(format.asbd.mChannelsPerFrame), bits=\(format.asbd.mBitsPerChannel)")
+        print("Format flags: \(format.asbd.mFormatFlags)")
+        print("Bytes per frame: \(format.asbd.mBytesPerFrame)")
+        print("Frames per packet: \(format.asbd.mFramesPerPacket)")
+
+        do {
+            sink = try OutputSink(deviceID: deviceID, internalFormat: format) { [weak self] bufferList, frameCapacity in
+                guard let self else { return 0 }
+                return self.render(into: bufferList, frameCapacity: frameCapacity)
+            }
+            print("Successfully created OutputSink for device \(deviceID)")
+        } catch {
+            print("Failed to create OutputSink for device \(deviceID): \(error)")
+            throw error
         }
     }
 
     func start() {
-        sink.start()
+        sink?.start()
     }
 
     func stop() {
-        sink.stop()
+        sink?.stop()
     }
 
     func addRoute(id: UUID, ring: AudioRingBuffer) {

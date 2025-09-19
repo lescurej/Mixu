@@ -11,24 +11,33 @@ import os.lock
 
 final class AudioSource {
     let uid: String
-    private let input: InputDevice
+    private var input: InputDevice?
     private let lock = OSAllocatedUnfairLock()
 
     private var routes: [UUID: AudioRingBuffer] = [:]
 
     init(uid: String, deviceID: AudioDeviceID, format: StreamFormat, useTestTone: Bool) throws {
         self.uid = uid
-        self.input = try InputDevice(deviceID: deviceID, format: format, useTestTone: useTestTone) { [weak self] buffer, frames in
+        // initialize other stored properties
+        // (routes and lock are already initialized inline)
+        
+        let input = try InputDevice(deviceID: deviceID,
+                                    format: format,
+                                    useTestTone: useTestTone,
+                                    handler: { [weak self] buffer, frames in
             self?.dispatch(buffer: buffer, frames: frames)
-        }
+        })
+        
+        self.input = input
     }
 
+
     func start() {
-        input.start()
+        input?.start()
     }
 
     func stop() {
-        input.stop()
+        input?.stop()
     }
 
     func addRoute(id: UUID, ring: AudioRingBuffer) {

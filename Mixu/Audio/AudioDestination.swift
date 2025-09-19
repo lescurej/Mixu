@@ -10,29 +10,42 @@ import Foundation
 import os.lock
 
 final class AudioDestination {
+    private final class RenderProxy {
+        weak var destination: AudioDestination?
+
+        func render(into bufferList: UnsafeMutableAudioBufferListPointer, frameCapacity: Int) -> Int {
+            destination?.renderInternal(into: bufferList, frameCapacity: frameCapacity) ?? 0
+        }
+    }
+
     let uid: String
     private let sink: OutputSink
     private let internalFormat: StreamFormat
     private let channelCount: Int
     private let lock = OSAllocatedUnfairLock()
 
+    private let renderProxy: RenderProxy
+
     private var routes: [UUID: AudioRingBuffer] = [:]
 
     init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat) throws {
+        let proxy = RenderProxy()
+
         self.uid = uid
         self.internalFormat = internalFormat
         self.channelCount = internalFormat.channelCount
-        let provider: OutputSink.RenderProvider = { [weak self] bufferList, frameCapacity in
-            guard let self else { return 0 }
-            return self.render(into: bufferList, frameCapacity: frameCapacity)
-        }
+        self.renderProxy = proxy
 
-        self.sink = try OutputSink(
+        let sink = try OutputSink(
             deviceID: deviceID,
             deviceFormat: deviceFormat,
             internalFormat: internalFormat,
-            provider: provider
+            provider: { [weak proxy] bufferList, frameCapacity in
+                proxy?.render(into: bufferList, frameCapacity: frameCapacity) ?? 0
+            }
         )
+        self.sink = sink
+        proxy.destination = self
     }
 
     func start() {
@@ -58,7 +71,7 @@ final class AudioDestination {
         return hasRoutes
     }
 
-    private func render(into bufferList: UnsafeMutableAudioBufferListPointer, frameCapacity: Int) -> Int {
+    private func renderInternal(into bufferList: UnsafeMutableAudioBufferListPointer, frameCapacity: Int) -> Int {
         guard frameCapacity > 0 else { return 0 }
 
         zero(bufferList: bufferList)

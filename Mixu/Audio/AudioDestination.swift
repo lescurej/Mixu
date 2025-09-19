@@ -22,14 +22,17 @@ final class AudioDestination {
         self.uid = uid
         self.internalFormat = internalFormat
         self.channelCount = internalFormat.channelCount
-        self.sink = try OutputSink(
-            deviceID: deviceID,
-            deviceFormat: deviceFormat,
-            internalFormat: internalFormat
-        ) { [weak self] bufferList, frameCapacity in
+        let provider: OutputSink.RenderProvider = { [weak self] bufferList, frameCapacity in
             guard let self else { return 0 }
             return self.render(into: bufferList, frameCapacity: frameCapacity)
         }
+
+        self.sink = try OutputSink(
+            deviceID: deviceID,
+            deviceFormat: deviceFormat,
+            internalFormat: internalFormat,
+            provider: provider
+        )
     }
 
     func start() {

@@ -228,9 +228,7 @@ private extension InputDevice {
         var timeStamp = AudioTimeStamp()
         timeStamp.mFlags = [.sampleTimeValid, .hostTimeValid]
 
-        let status = withUnsafeMutablePointer(to: &audioBufferList) { listPtr in
-            AudioUnitRender(unit, &flags, &timeStamp, 1, frameCount, listPtr)
-        }
+        let status = AudioUnitRender(unit, &flags, &timeStamp, 1, frameCount, audioBufferList.unsafeMutablePointer)
 
         guard status == noErr else {
             return status

@@ -11,6 +11,9 @@ import AVFoundation
 struct StreamFormat {
     var asbd: AudioStreamBasicDescription
 
+    var channelCount: Int { Int(asbd.mChannelsPerFrame) }
+    var sampleRate: Double { asbd.mSampleRate }
+
     static func make(sampleRate: Double, channels: UInt32) -> StreamFormat {
         var f = AudioStreamBasicDescription()
         f.mSampleRate = sampleRate

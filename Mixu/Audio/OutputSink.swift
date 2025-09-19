@@ -7,172 +7,208 @@
 
 import AudioToolbox
 import AVFoundation
-import os.log
 
-// MARK: - Per-Destination Output with Async SRC + Fill-Level PLL
+// MARK: - Output sink with sample-rate conversion and fan-out support
 final class OutputSink {
+    typealias RenderProvider = (_ bufferList: UnsafeMutableAudioBufferListPointer, _ frameCapacity: Int) -> Int
+
     private var unit: AudioUnit?
     private let deviceID: AudioDeviceID
-    private var outFormat: StreamFormat
-    private var inFormat: StreamFormat
-    private let ring: AudioRingBuffer
+    private let internalFormat: StreamFormat
+    private var deviceFormat: StreamFormat
+    private let provider: RenderProvider
 
-    // SRC using AVAudioConverter for simplicity
-    private var converter: AVAudioConverter!
-    private var correctionPPM: Double = 0 // dynamic drift correction
+    private var converter: AVAudioConverter?
+    private let internalAVFormat: AVAudioFormat
+    private var deviceAVFormat: AVAudioFormat
+    private var isRunning = false
 
-    // Target fill control (keeps ring around this level to absorb jitter)
-    private let targetFill: Double = 0.5 // 50% full
-    private let kp: Double = 50.0       // proportional gain → adjust as needed (ppm per unit error)
-
-    private var renderCount = 0
-
-    init(deviceID: AudioDeviceID, inFormat: StreamFormat, outFormat: StreamFormat, ring: AudioRingBuffer) throws {
+    init(deviceID: AudioDeviceID, internalFormat: StreamFormat, provider: @escaping RenderProvider) throws {
         self.deviceID = deviceID
-        self.inFormat = inFormat
-        self.outFormat = outFormat
-        self.ring = ring
-        try setup()
+        self.internalFormat = internalFormat
+        self.provider = provider
+        self.deviceFormat = internalFormat
+
+        var internalFormatCopy = internalFormat.asbd
+        guard let internalAVFormat = AVAudioFormat(streamDescription: &internalFormatCopy) else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError), userInfo: nil)
+        }
+        self.internalAVFormat = internalAVFormat
+        self.deviceAVFormat = internalAVFormat
+
+        try setupHardwareOutput()
     }
 
-    private func setup() throws {
-        var desc = AudioComponentDescription(
+    deinit {
+        stop()
+        if let unit { AudioComponentInstanceDispose(unit) }
+    }
+
+    func start() {
+        guard let unit, !isRunning else { return }
+        let status = AudioOutputUnitStart(unit)
+        if status != noErr {
+            print("OutputSink start failed: \(status)")
+        }
+        isRunning = status == noErr
+    }
+
+    func stop() {
+        guard let unit, isRunning else { return }
+        let status = AudioOutputUnitStop(unit)
+        if status != noErr {
+            print("OutputSink stop failed: \(status)")
+        }
+        if status == noErr {
+            isRunning = false
+        }
+    }
+}
+
+// MARK: - Hardware configuration
+private extension OutputSink {
+    func setupHardwareOutput() throws {
+        var description = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
-            componentSubType: kAudioUnitSubType_DefaultOutput, // 🔑
+            componentSubType: kAudioUnitSubType_HALOutput,
             componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0, componentFlagsMask: 0
+            componentFlags: 0,
+            componentFlagsMask: 0
         )
-        guard let comp = AudioComponentFindNext(nil, &desc) else {
-            throw NSError(domain: "HAL", code: -2, userInfo: [NSLocalizedDescriptionKey: "HALOutput not found"])
+
+        guard let component = AudioComponentFindNext(nil, &description) else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudioUnitErr_InvalidProperty), userInfo: nil)
         }
-        var u: AudioUnit?
-        check(AudioComponentInstanceNew(comp, &u), "AudioComponentInstanceNew output")
-        unit = u
 
-        // Enable output on bus 0
-        var enableIO: UInt32 = 1
-        check(AudioUnitSetProperty(u!, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableIO, UInt32(MemoryLayout.size(ofValue: enableIO))), "Enable output")
-        // Disable input on bus 1
-        var disableIO: UInt32 = 0
-        check(AudioUnitSetProperty(u!, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &disableIO, UInt32(MemoryLayout.size(ofValue: disableIO))), "Disable input")
+        var newUnit: AudioUnit?
+        try check(AudioComponentInstanceNew(component, &newUnit), message: "AudioComponentInstanceNew")
+        unit = newUnit
+        guard let unit else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudioUnitErr_Uninitialized), userInfo: nil) }
 
-        // Bind to specific device
-        var dev = deviceID
-        check(AudioUnitSetProperty(u!, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, UInt32(MemoryLayout.size(ofValue: dev))), "Bind output device")
+        var enableOutput: UInt32 = 1
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableOutput, UInt32(MemoryLayout.size(ofValue: enableOutput))), message: "Enable output bus")
 
-        // Configure AU input format to match our output format (to the physical device)
-        var outASBD = outFormat.asbd
-        check(AudioUnitSetProperty(u!, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &outASBD, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), "Set output stream format")
+        var disableInput: UInt32 = 0
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &disableInput, UInt32(MemoryLayout.size(ofValue: disableInput))), message: "Disable input bus")
 
-        // Render callback (6 params!)
-        let ctx = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        var cb = AURenderCallbackStruct(
-            inputProc: { inRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, ioData -> OSStatus in
-                let ref = Unmanaged<OutputSink>.fromOpaque(inRefCon).takeUnretainedValue()
-                return ref.renderOutput(inNumberFrames: inNumberFrames, ioData: ioData!)
+        var device = deviceID
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, UInt32(MemoryLayout.size(ofValue: device))), message: "Bind device")
+
+        var deviceFormatASBD = AudioStreamBasicDescription()
+        var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &deviceFormatASBD, &dataSize), message: "Query device stream format")
+
+        deviceFormat = StreamFormat(asbd: deviceFormatASBD)
+
+        var deviceFormatCopy = deviceFormatASBD
+        guard let outputFormat = AVAudioFormat(streamDescription: &deviceFormatCopy) else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(kAudio_ParamError), userInfo: nil)
+        }
+
+        deviceAVFormat = outputFormat
+
+        let asbd = deviceFormat.asbd
+        let canonical = internalFormat.asbd
+        let needsConversion = asbd.mSampleRate != canonical.mSampleRate ||
+            asbd.mChannelsPerFrame != canonical.mChannelsPerFrame ||
+            asbd.mFormatID != canonical.mFormatID ||
+            asbd.mFormatFlags != canonical.mFormatFlags ||
+            asbd.mBytesPerFrame != canonical.mBytesPerFrame ||
+            asbd.mFramesPerPacket != canonical.mFramesPerPacket
+
+        if needsConversion {
+            converter = AVAudioConverter(from: internalAVFormat, to: outputFormat)
+            converter?.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
+            converter?.sampleRateConverterQuality = .max
+        }
+
+        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &deviceFormatASBD, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)), message: "Set input stream format")
+
+        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        var callback = AURenderCallbackStruct(
+            inputProc: { refCon, _, _, _, frameCount, ioData -> OSStatus in
+                let sink = Unmanaged<OutputSink>.fromOpaque(refCon).takeUnretainedValue()
+                guard let ioData else { return noErr }
+                return sink.render(frameCount: frameCount, ioData: ioData)
             },
-            inputProcRefCon: ctx
+            inputProcRefCon: selfPointer
         )
-        check(AudioUnitSetProperty(u!, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "Set output render callback")
 
-        check(AudioUnitInitialize(u!), "Initialize output AUHAL")
-
-        // Create converter (input = ring format, output = AU/physical format)
-        let inFormatAV = AVAudioFormat(streamDescription: &self.inFormat.asbd)!
-        let outFormatAV = AVAudioFormat(streamDescription: &outASBD)!
-        converter = AVAudioConverter(from: inFormatAV, to: outFormatAV)
-        converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
-        converter.sampleRateConverterQuality = .max
+        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), message: "Install render callback")
+        try check(AudioUnitInitialize(unit), message: "Initialize output unit")
     }
 
-    // Add more detailed logging to the OutputSink
-    private func renderOutput(inNumberFrames: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
-        // Get buffer list for easier access
-        let buffers = UnsafeMutableAudioBufferListPointer(ioData)
-        
-        // Log buffer details
-        print("🔍 OutputSink renderOutput called:")
-        print("  - Number of frames: \(inNumberFrames)")
-        print("  - Number of buffers: \(buffers.count)")
-        for i in 0..<buffers.count {
-            print("  - Buffer \(i): \(buffers[i].mNumberChannels) channels, \(buffers[i].mDataByteSize) bytes")
-        }
-        
-        // Check if ring buffer has data
-        let fillLevel = ring.fillLevel()
-        print("  - Ring buffer fill level: \(fillLevel)")
-        
-        if fillLevel == 0.0 {
-            // Output silence if no data available
-            for i in 0..<buffers.count {
-                memset(buffers[i].mData, 0, Int(buffers[i].mDataByteSize))
-            }
+    func render(frameCount: UInt32, ioData: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
+        guard frameCount > 0 else { return noErr }
+
+        let ioBuffers = UnsafeMutableAudioBufferListPointer(ioData)
+        zero(buffers: ioBuffers)
+
+        guard let internalBuffer = AVAudioPCMBuffer(pcmFormat: internalAVFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
             return noErr
         }
 
-        // Pull from ring buffer
-        let framesNeeded = Int(inNumberFrames)
-        let channels = Int(inFormat.asbd.mChannelsPerFrame)
-        let tmp = UnsafeMutablePointer<Float>.allocate(capacity: framesNeeded * channels)
-        defer { tmp.deallocate() }
-        
-        let pulled = ring.read(into: tmp, frames: framesNeeded)
-        
-        print("  - Pulled \(pulled) frames from ring buffer")
-        
-        if pulled == 0 {
-            // Output silence if no data pulled
-            for i in 0..<buffers.count {
-                memset(buffers[i].mData, 0, Int(buffers[i].mDataByteSize))
-            }
-            return noErr
-        }
+        clear(buffer: internalBuffer)
 
-        // Check if output is interleaved or non-interleaved
-        let isOutputInterleaved = buffers.count == 1 && buffers[0].mNumberChannels > 1
-        print("  - Output format is \(isOutputInterleaved ? "interleaved" : "non-interleaved")")
-        
-        if isOutputInterleaved {
-            // For interleaved output, copy directly
-            let bytesPerFrame = 4 * channels  // 4 bytes per sample (32-bit float) * channels
-            let bytesToCopy = min(Int(buffers[0].mDataByteSize), pulled * bytesPerFrame)
-            
-            print("  - Copying \(bytesToCopy) bytes directly to interleaved output buffer")
-            
-            if let mData = buffers[0].mData {
-                memcpy(mData, tmp, bytesToCopy)
+        let providedFrames = provider(UnsafeMutableAudioBufferListPointer(internalBuffer.mutableAudioBufferList), Int(frameCount))
+        let validFrames = max(0, min(providedFrames, Int(frameCount)))
+        internalBuffer.frameLength = AVAudioFrameCount(validFrames)
+
+        guard validFrames > 0 else { return noErr }
+
+        if let converter {
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: deviceAVFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+                return noErr
             }
+
+            clear(buffer: outputBuffer)
+
+            do {
+                try converter.convert(to: outputBuffer, from: internalBuffer)
+            } catch {
+                print("OutputSink conversion failed: \(error)")
+                return noErr
+            }
+
+            copy(from: outputBuffer, to: ioBuffers)
         } else {
-            // For non-interleaved output, de-interleave our data
-            print("  - De-interleaving data to \(buffers.count) output buffers")
-            
-            for ch in 0..<min(channels, buffers.count) {
-                if let mData = buffers[ch].mData {
-                    let outBuffer = mData.assumingMemoryBound(to: Float.self)
-                    
-                    // Copy each channel
-                    for frame in 0..<pulled {
-                        outBuffer[frame] = tmp[frame * channels + ch]
-                    }
-                }
-            }
+            copy(from: internalBuffer, to: ioBuffers)
         }
 
         return noErr
     }
 
-    func start() {
-        guard let unit = unit else { return }
-        let status = AudioOutputUnitStart(unit)
-        print("🔊 Starting output device: status = \(status)")
-        if status != noErr {
-            print("❌ Failed to start output device: \(status)")
+    func zero(buffers: UnsafeMutableAudioBufferListPointer) {
+        for buffer in buffers {
+            if let data = buffer.mData {
+                memset(data, 0, Int(buffer.mDataByteSize))
+            }
         }
     }
 
-    func stop() {
-        guard let unit = unit else { return }
-        let status = AudioOutputUnitStop(unit)
-        print("🔇 Stopping output device: status = \(status)")
+    func clear(buffer: AVAudioPCMBuffer) {
+        let list = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        for audioBuffer in list {
+            if let data = audioBuffer.mData {
+                memset(data, 0, Int(audioBuffer.mDataByteSize))
+            }
+        }
+    }
+
+    func copy(from buffer: AVAudioPCMBuffer, to buffers: UnsafeMutableAudioBufferListPointer) {
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        for index in 0..<min(buffers.count, sourceBuffers.count) {
+            let byteCount = Int(sourceBuffers[index].mDataByteSize)
+            if let dst = buffers[index].mData, let src = sourceBuffers[index].mData {
+                memcpy(dst, src, byteCount)
+                buffers[index].mDataByteSize = UInt32(byteCount)
+            }
+        }
+    }
+
+    func check(_ status: OSStatus, message: String) throws {
+        guard status == noErr else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: message])
+        }
     }
 }

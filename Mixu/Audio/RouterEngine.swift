@@ -7,52 +7,38 @@ struct AudioConnection {
     let id: UUID
     let fromDeviceUID: String
     let fromPortIndex: Int
-    let toDeviceUID: String  
+    let toDeviceUID: String
     let toPortIndex: Int
 }
 
-// MARK: - Enhanced Router Engine
+// MARK: - Router Engine
 class RouterEngine: ObservableObject {
     private let deviceManager = AudioDeviceManager()
-    
+
     @Published var passThruName: String = "BlackHole 64ch"
     @Published var selectedOutputs: Set<String> = []
     @Published var audioConnections: [AudioConnection] = []
-    
-    private var inputs: [String: InputDevice] = [:]  // UID → input device
-    private var sinks: [String: OutputSink] = [:]    // UID → output sink
-    private var rings: [String: AudioRingBuffer] = [:] // Connection ID → ring buffer
-    
-    private var inFormat = StreamFormat.make(sampleRate: 48000, channels: 2)
-    
+
+    private var sources: [String: AudioSource] = [:]
+    private var destinations: [String: AudioDestination] = [:]
+    private var rings: [UUID: AudioRingBuffer] = [:]
+
+    private var canonicalFormat = StreamFormat.make(sampleRate: 48_000, channels: 2)
+
     func availableOutputs() -> [AudioDevice] {
         deviceManager.allDevices().filter { $0.numOutputs > 0 }
     }
-    
+
     func availableInputs() -> [AudioDevice] {
         deviceManager.allDevices().filter { $0.numInputs > 0 }
     }
-    
-    func getPassThru() -> AudioDevice {
-        deviceManager.findDevice(byName: passThruName)!
+
+    func passThruDevice() -> AudioDevice? {
+        deviceManager.findDevice(byName: passThruName)
     }
-    
+
     // MARK: - Connection Management
     func createAudioConnection(id: UUID, fromDeviceUID: String, fromPort: Int, toDeviceUID: String, toPort: Int) {
-        print("Creating audio connection:")
-        print("  From UID: \(fromDeviceUID)")
-        print("  To UID: \(toDeviceUID)")
-        
-        // Debug: List all available device UIDs
-        print("Available input devices:")
-        for device in availableInputs() {
-            print("  - \(device.name): \(device.uid)")
-        }
-        print("Available output devices:")
-        for device in availableOutputs() {
-            print("  - \(device.name): \(device.uid)")
-        }
-        
         let connection = AudioConnection(
             id: id,
             fromDeviceUID: fromDeviceUID,
@@ -60,158 +46,137 @@ class RouterEngine: ObservableObject {
             toDeviceUID: toDeviceUID,
             toPortIndex: toPort
         )
-        
+
+        let capacity = Int(canonicalFormat.sampleRate / 10.0)
+        let ring = AudioRingBuffer(capacityFrames: max(1, capacity), channels: canonicalFormat.channelCount)
+
+        guard let source = ensureSource(uid: fromDeviceUID) else {
+            print("Failed to create source for UID \(fromDeviceUID)")
+            return
+        }
+
+        guard let destination = ensureDestination(uid: toDeviceUID) else {
+            print("Failed to create destination for UID \(toDeviceUID)")
+            if !source.removeRoute(id: id) {
+                releaseSource(uid: fromDeviceUID)
+            }
+            return
+        }
+
+        rings[id] = ring
+        source.addRoute(id: id, ring: ring)
+        destination.addRoute(id: id, ring: ring)
+
+        source.start()
+        destination.start()
+
         audioConnections.append(connection)
-        setupAudioRouting(for: connection)
     }
-    
+
     func removeAudioConnection(id: UUID) {
-        audioConnections.removeAll { $0.id == id }
-        teardownAudioRouting(for: id)
+        guard let index = audioConnections.firstIndex(where: { $0.id == id }) else { return }
+        let connection = audioConnections.remove(at: index)
+        teardownAudioRouting(for: connection)
     }
-    
-    // Update the setupAudioRouting method to always use real devices
-    private func setupAudioRouting(for connection: AudioConnection) {
-        // Create dedicated ring buffer for this connection
-        let ring = AudioRingBuffer(capacityFrames: 4800, channels: 2)
-        rings[connection.id.uuidString] = ring
-        
-        // Always try to use real device input first
-        if let inputDevice = availableInputs().first(where: { $0.uid == connection.fromDeviceUID }) {
-            print("🎤 Setting up real input device: \(inputDevice.name)")
-            setupInputDevice(uid: connection.fromDeviceUID, ring: ring)
-        } else {
-            // Fall back to test tone only if device not found
-            print("⚠️ Input device not found, using test tone generator")
-            setupTestToneGenerator(uid: connection.fromDeviceUID, ring: ring)
-        }
-        
-        // Setup output device
-        if let outputDevice = availableOutputs().first(where: { $0.uid == connection.toDeviceUID }) {
-            print("🔊 Setting up real output device: \(outputDevice.name)")
-            setupOutputDevice(uid: connection.toDeviceUID, ring: ring)
-        } else {
-            print("❌ Output device not found: \(connection.toDeviceUID)")
-        }
-    }
-    
-    private func setupTestToneGenerator(uid: String, ring: AudioRingBuffer) {
-        // Create a test tone generator instead of a real input device
-        print("🎵 Setting up test tone generator for \(uid)")
-        
-        do {
-            // Use dummy device ID since we're not actually using it
-            let dummyDeviceID: AudioDeviceID = 0
-            let testTone = try InputDevice(deviceID: dummyDeviceID, format: inFormat, ring: ring)
-            inputs[uid] = testTone
-            testTone.start()
-            print("🎵 Started test tone generator for \(uid)")
-        } catch {
-            print("❌ Failed to start test tone generator: \(error)")
-        }
-    }
-    
-    private func setupInputDevice(uid: String, ring: AudioRingBuffer) {
-        guard inputs[uid] == nil else { return }
-        
-        guard let device = deviceManager.allDevices().first(where: { $0.uid == uid }),
-              let deviceID = deviceManager.deviceID(forUID: uid) else {
-            print("❌ Input device not found: \(uid)")
-            return
-        }
-        
-        // Only set up input devices that actually have inputs
-        guard device.numInputs > 0 else {
-            print("❌ Device has no inputs: \(device.name)")
-            return
-        }
-        
-        do {
-            let input = try InputDevice(deviceID: deviceID, format: inFormat, ring: ring)
-            inputs[uid] = input
-            input.start()
-            print("✅ Started input device: \(device.name)")
-        } catch {
-            print("❌ Failed to start input \(device.name): \(error)")
-        }
-    }
-    
-    private func setupOutputDevice(uid: String, ring: AudioRingBuffer) {
-        guard sinks[uid] == nil else { return }
-        
-        guard let device = deviceManager.allDevices().first(where: { $0.uid == uid }),
-              let deviceID = deviceManager.deviceID(forUID: uid) else {
-            print("❌ Output device not found: \(uid)")
-            return
-        }
-        
-        // Only set up output devices that actually have outputs
-        guard device.numOutputs > 0 else {
-            print("❌ Device has no outputs: \(device.name)")
-            return
-        }
-        
-        do {
-            let outFormat = StreamFormat.make(sampleRate: 48000, channels: 2)
-            let sink = try OutputSink(deviceID: deviceID, inFormat: inFormat, outFormat: outFormat, ring: ring)
-            sinks[uid] = sink
-            sink.start()
-            print("✅ Started output device: \(device.name)")
-        } catch {
-            print("❌ Failed to start output \(device.name): \(error)")
-        }
-    }
-    
-    private func teardownAudioRouting(for connectionId: UUID) {
-        let connectionIdString = connectionId.uuidString
-        rings.removeValue(forKey: connectionIdString)
-        
-        // Clean up unused inputs and outputs
-        cleanupUnusedDevices()
-    }
-    
-    private func cleanupUnusedDevices() {
-        let usedInputUIDs = Set(audioConnections.map { $0.fromDeviceUID })
-        let usedOutputUIDs = Set(audioConnections.map { $0.toDeviceUID })
-        
-        // Remove unused inputs
-        for (uid, input) in inputs {
-            if !usedInputUIDs.contains(uid) {
-                input.stop()
-                inputs.removeValue(forKey: uid)
-            }
-        }
-        
-        // Remove unused outputs
-        for (uid, sink) in sinks {
-            if !usedOutputUIDs.contains(uid) {
-                sink.stop()
-                sinks.removeValue(forKey: uid)
-            }
-        }
-    }
-    
-    // MARK: - Legacy methods (keep for compatibility)
+
     func start() {
-        // Legacy start - now connections are managed individually
+        // Connections are started on demand.
     }
-    
+
     func stop() {
-        // Stop all audio devices
-        inputs.values.forEach { $0.stop() }
-        sinks.values.forEach { $0.stop() }
-        inputs.removeAll()
-        sinks.removeAll()
-        rings.removeAll()
         audioConnections.removeAll()
+        rings.removeAll()
+
+        for source in sources.values {
+            source.stop()
+        }
+        sources.removeAll()
+
+        for destination in destinations.values {
+            destination.stop()
+        }
+        destinations.removeAll()
     }
-    
+
     func toggleOutput(_ device: AudioDevice, enabled: Bool) {
-        // Legacy method - kept for compatibility
         if enabled {
             selectedOutputs.insert(device.uid)
         } else {
             selectedOutputs.remove(device.uid)
         }
+    }
+}
+
+// MARK: - Helpers
+private extension RouterEngine {
+    func ensureSource(uid: String) -> AudioSource? {
+        if let existing = sources[uid] { return existing }
+
+        guard let deviceID = deviceManager.deviceID(forUID: uid) else {
+            // Fall back to a software generated tone for missing devices.
+            do {
+                let source = try AudioSource(uid: uid, deviceID: 0, format: canonicalFormat, useTestTone: true)
+                sources[uid] = source
+                return source
+            } catch {
+                print("Unable to create test tone source: \(error)")
+                return nil
+            }
+        }
+
+        do {
+            let source = try AudioSource(uid: uid, deviceID: deviceID, format: canonicalFormat, useTestTone: false)
+            sources[uid] = source
+            return source
+        } catch {
+            print("Source creation failed for \(uid): \(error)")
+            return nil
+        }
+    }
+
+    func ensureDestination(uid: String) -> AudioDestination? {
+        if let existing = destinations[uid] { return existing }
+
+        guard let deviceID = deviceManager.deviceID(forUID: uid) else {
+            print("Destination device not found for UID \(uid)")
+            return nil
+        }
+
+        do {
+            let destination = try AudioDestination(uid: uid, deviceID: deviceID, format: canonicalFormat)
+            destinations[uid] = destination
+            return destination
+        } catch {
+            print("Destination creation failed for \(uid): \(error)")
+            return nil
+        }
+    }
+
+    func teardownAudioRouting(for connection: AudioConnection) {
+        rings.removeValue(forKey: connection.id)
+
+        if let source = sources[connection.fromDeviceUID] {
+            let stillInUse = source.removeRoute(id: connection.id)
+            if !stillInUse {
+                releaseSource(uid: connection.fromDeviceUID)
+            }
+        }
+
+        if let destination = destinations[connection.toDeviceUID] {
+            let stillInUse = destination.removeRoute(id: connection.id)
+            if !stillInUse {
+                releaseDestination(uid: connection.toDeviceUID)
+            }
+        }
+    }
+
+    func releaseSource(uid: String) {
+        guard let source = sources.removeValue(forKey: uid) else { return }
+        source.stop()
+    }
+
+    func releaseDestination(uid: String) {
+        guard let destination = destinations.removeValue(forKey: uid) else { return }
+        destination.stop()
     }
 }

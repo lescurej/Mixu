@@ -11,7 +11,7 @@ import os.lock
 
 final class AudioSource {
     let uid: String
-    private let input: InputDevice
+    private var input: InputDevice!
     private let lock = OSAllocatedUnfairLock()
     private let channelCount: Int
 
@@ -20,14 +20,18 @@ final class AudioSource {
     init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat, useTestTone: Bool) throws {
         self.uid = uid
         self.channelCount = internalFormat.channelCount
+
+        let handler: InputDevice.SampleHandler = { [weak self] buffer, frames in
+            self?.dispatch(buffer: buffer, frames: frames)
+        }
+
         self.input = try InputDevice(
             deviceID: deviceID,
             deviceFormat: deviceFormat,
             internalFormat: internalFormat,
-            useTestTone: useTestTone
-        ) { [weak self] buffer, frames in
-            self?.dispatch(buffer: buffer, frames: frames)
-        }
+            useTestTone: useTestTone,
+            handler: handler
+        )
     }
 
     func start() {

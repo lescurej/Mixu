@@ -14,56 +14,77 @@ final class AudioDestination {
         weak var destination: AudioDestination?
 
         func render(into bufferList: UnsafeMutableAudioBufferListPointer, frameCapacity: Int) -> Int {
-            destination?.renderInternal(into: bufferList, frameCapacity: frameCapacity) ?? 0
+            return destination?.renderInternal(into: bufferList, frameCapacity: frameCapacity) ?? 0
         }
     }
 
     let uid: String
     private let sink: OutputSink
     private let internalFormat: StreamFormat
-    private let channelCount: Int
+    let channelCount: Int
     private let lock = OSAllocatedUnfairLock()
 
     private let renderProxy: RenderProxy
 
-    private var routes: [UUID: AudioRingBuffer] = [:]
+    var routes: [UUID: AudioRingBuffer] = [:]
+    
+    // Logging
+    private var lastLogTime: CFAbsoluteTime = 0
+    private let logInterval: CFAbsoluteTime = 2.0
+    private var totalFramesRendered: Int = 0
 
-    init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat) throws {
+    init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat, channelOffset: Int) throws {
+        print("🔊 AudioDestination.init: uid=\(uid), deviceID=\(deviceID)")
+        print("  deviceFormat: \(deviceFormat.debugDescription)")
+        print("  internalFormat: \(internalFormat.debugDescription)")
+        print("  deviceFormat channels: \(deviceFormat.channelCount)")
+        print("  deviceFormat sampleRate: \(deviceFormat.sampleRate)")
+        print("  channelOffset: \(channelOffset)")
+        
         let proxy = RenderProxy()
 
         self.uid = uid
         self.internalFormat = internalFormat
         self.channelCount = internalFormat.channelCount
         self.renderProxy = proxy
-
-        let sink = try OutputSink(
-            deviceID: deviceID,
-            deviceFormat: deviceFormat,
-            internalFormat: internalFormat,
-            provider: { [weak proxy] bufferList, frameCapacity in
-                proxy?.render(into: bufferList, frameCapacity: frameCapacity) ?? 0
-            }
-        )
+        let sink: OutputSink
+        do {
+            sink = try OutputSink(
+                deviceID: deviceID,
+                deviceFormat: deviceFormat,
+                internalFormat: internalFormat,
+                channelOffset: channelOffset,
+                provider: { [weak proxy] bufferList, frameCapacity in
+                    proxy?.render(into: bufferList, frameCapacity: frameCapacity) ?? 0
+                }
+            )
+        } catch {
+            print("❌ AudioDestination.init: Failed to create OutputSink: \(error)")
+            throw error
+        }
         self.sink = sink
         proxy.destination = self
     }
 
     func start() {
+        print("▶️ AudioDestination.start: uid=\(uid)")
         sink.start()
     }
 
     func stop() {
+        print("⏹️ AudioDestination.stop: uid=\(uid)")
         sink.stop()
     }
 
     func addRoute(id: UUID, ring: AudioRingBuffer) {
+        print("🔗 AudioDestination.addRoute: uid=\(uid), routeId=\(id)")
         lock.lock()
-        precondition(ring.channelCount == channelCount, "Ring buffer channel count mismatch for destination \(uid)")
         routes[id] = ring
         lock.unlock()
     }
 
     func removeRoute(id: UUID) -> Bool {
+        print("🔌 AudioDestination.removeRoute: uid=\(uid), routeId=\(id)")
         lock.lock()
         routes.removeValue(forKey: id)
         let hasRoutes = !routes.isEmpty
@@ -80,7 +101,10 @@ final class AudioDestination {
         let activeRoutes = Array(routes.values)
         lock.unlock()
 
-        guard !activeRoutes.isEmpty else { return 0 }
+        guard !activeRoutes.isEmpty else { 
+            print("⚠️ AudioDestination.renderInternal: No routes available for \(uid)")
+            return 0 
+        }
 
         let channels = channelCount
         let temp = UnsafeMutablePointer<Float>.allocate(capacity: frameCapacity * channels)
@@ -88,22 +112,25 @@ final class AudioDestination {
 
         var producedFrames = 0
 
-        for ring in activeRoutes {
+        for (index, ring) in activeRoutes.enumerated() {
+            let fillLevelBefore = ring.fillLevel()
             let framesRead = ring.read(into: temp, frames: frameCapacity)
+            let fillLevelAfter = ring.fillLevel()
             producedFrames = max(producedFrames, framesRead)
             mix(buffer: temp, frames: framesRead, into: bufferList, channels: channels)
         }
 
         updateByteSizes(bufferList: bufferList, frames: producedFrames, channels: channels)
+        totalFramesRendered += producedFrames
+        
         return producedFrames
     }
 
     private func zero(bufferList: UnsafeMutableAudioBufferListPointer) {
-        for buffer in bufferList {
-            if let data = buffer.mData {
-                memset(data, 0, Int(buffer.mDataByteSize))
+        for i in 0..<bufferList.count {
+                guard bufferList[i].mDataByteSize > 0, let data = bufferList[i].mData else { continue }
+                memset(data, 0, Int(bufferList[i].mDataByteSize))
             }
-        }
     }
 
     private func mix(buffer: UnsafePointer<Float>, frames: Int, into bufferList: UnsafeMutableAudioBufferListPointer, channels: Int) {

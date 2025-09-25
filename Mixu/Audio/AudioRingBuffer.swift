@@ -6,30 +6,36 @@
 //
 
 import os.lock
+import Foundation
 
 /// Lock-based Ring Buffer (Swift 6 safe).
 /// Single-producer / single-consumer. Uses OSAllocatedUnfairLock.
 final class AudioRingBuffer {
     private let capacityFrames: Int
-    private let channels: Int
     private var buffer: [Float]
     private var writeIndex: Int = 0
     private var availableFrames: Int = 0
     private let lock = OSAllocatedUnfairLock()
+    
+    // Logging
+    private var writeCount: Int = 0
+    private var readCount: Int = 0
+    private var lastLogTime: CFAbsoluteTime = 0
+    private let logInterval: CFAbsoluteTime = 1.0 // Log every second
 
-    init(capacityFrames: Int, channels: Int) {
+    init(capacityFrames: Int) {
         self.capacityFrames = capacityFrames
-        self.channels = channels
-        self.buffer = Array(repeating: 0, count: capacityFrames * channels)
+        self.buffer = Array(repeating: 0, count: capacityFrames)
+        print("🔧 AudioRingBuffer: Created with capacity \(capacityFrames) frames")
     }
 
-    var channelCount: Int { channels }
-
     func write(_ input: UnsafePointer<Float>, frames: Int) {
-        let totalSamples = frames * channels
-        let cap = capacityFrames * channels
+        let totalSamples = frames
+        let cap = capacityFrames
 
         lock.lock()
+        let fillLevelBefore = Double(availableFrames) / Double(capacityFrames)
+        
         var remaining = totalSamples
         var src = input
         while remaining > 0 {
@@ -45,6 +51,8 @@ final class AudioRingBuffer {
         }
         availableFrames = min(capacityFrames, availableFrames + frames)
         
+        writeCount += 1
+        
         lock.unlock()
     }
 
@@ -52,9 +60,9 @@ final class AudioRingBuffer {
     func read(into output: UnsafeMutablePointer<Float>, frames: Int) -> Int {
         lock.lock()
 
-        let framesToRead = min(frames, availableFrames)
-        let samplesToRead = framesToRead * channels
-        let cap = capacityFrames * channels
+        let framesToRead = min(frames, availableFrames)  // FIXED: Use min() to respect available data
+        let samplesToRead = framesToRead
+        let cap = capacityFrames
         let readIndex = (writeIndex - samplesToRead + cap) % cap
 
         buffer.withUnsafeBufferPointer { srcBuf in
@@ -70,14 +78,16 @@ final class AudioRingBuffer {
         }
 
         availableFrames -= framesToRead
+        readCount += 1
 
         // Fill remainder with zeros if asked for more
         if framesToRead < frames {
-            let deficit = (frames - framesToRead) * channels
+            let deficit = (frames - framesToRead)
             memset(output.advanced(by: samplesToRead), 0, deficit * MemoryLayout<Float>.size)
         }
 
         lock.unlock()
+        
         return framesToRead
     }
 
@@ -87,5 +97,19 @@ final class AudioRingBuffer {
         let level = Double(availableFrames) / Double(capacityFrames)
         lock.unlock()
         return level
+    }
+    
+    /// Get detailed status for debugging
+    func getStatus() -> (fillLevel: Double, availableFrames: Int, capacityFrames: Int, writeCount: Int, readCount: Int) {
+        lock.lock()
+        let status = (
+            fillLevel: Double(availableFrames) / Double(capacityFrames),
+            availableFrames: availableFrames,
+            capacityFrames: capacityFrames,
+            writeCount: writeCount,
+            readCount: readCount
+        )
+        lock.unlock()
+        return status
     }
 }

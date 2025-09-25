@@ -81,9 +81,8 @@ struct PatchbayView: View {
                     
                     Canvas { ctx, _ in
                         if let fromId = draggingFrom, let fromPos = portPositions[fromId] {
-                            ctx.stroke(curvePath(fromPos, tempPoint),
-                                       with: .color(.orange),
-                                       style: StrokeStyle(lineWidth: 2, dash: [6]))
+                            let path = curvePath(fromPos, tempPoint)
+                            ctx.stroke(path, with: .color(.orange), style: StrokeStyle(lineWidth: 2, dash: [6]))
                         }
                     }
                      .allowsHitTesting(false)
@@ -98,7 +97,7 @@ struct PatchbayView: View {
                                     tempPoint: $tempPoint,
                                     onDrag: handleDrag,
                                     onRelease: { deviceBox, fromPortId, point in
-                                        handleRelease(from: fromPortId, to: findClosestPort(at: point))
+                                        handleRelease(from: fromPortId, to: findClosestPort(at: point) ?? nil)
                                     }
                                 )
                             }
@@ -191,13 +190,13 @@ struct PatchbayView: View {
         
         // Add input devices (devices with inputs)
         let inputDeviceList = engine.availableInputs().filter { $0.name != engine.passThruName }
-        for (index, device) in inputDeviceList.enumerated() {
+        for (_, device) in inputDeviceList.enumerated() {
             var ports: [Port] = []
             
             // Add output ports for input devices (they send audio)
             for i in 0..<device.numInputs {
                 let yPos = 40 + CGFloat(i) * 30
-                ports.append(Port(name: "Out \(i+1)", isInput: false, uid: device.uid, local: CGPoint(x: 0, y: yPos)))
+                ports.append(Port(name: "Out \(i+1)", device: device, index: i, isInput: false, uid: device.uid, local: CGPoint(x: 0, y: yPos)))
             }
             
             self.inputDevices.append(DeviceBox(
@@ -211,18 +210,18 @@ struct PatchbayView: View {
         }
                 
         // Add passthru device
-        let passthru = engine.getPassThru()
+        guard let passthru = engine.passThruDevice() else { return }
         var passthruPorts: [Port] = []
         // Add input ports for passthru
         for i in 0..<passthru.numInputs {
             let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "In \(i+1)", isInput: true, uid: passthru.uid, local: CGPoint(x: 120, y: yPos)))
+            passthruPorts.append(Port(name: "In \(i+1)", device: passthru, index: i, isInput: true, uid: passthru.uid, local: CGPoint(x: 120, y: yPos)))
         }
         
         // Add output ports for passthru
         for i in 0..<passthru.numOutputs {
             let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "Out \(i+1)", isInput: false, uid: passthru.uid, local: CGPoint(x: 0, y: yPos)))
+            passthruPorts.append(Port(name: "Out \(i+1)", device: passthru, index: i, isInput: false, uid: passthru.uid, local: CGPoint(x: 0, y: yPos)))
         }
         
         self.passThruDevice.append(DeviceBox(
@@ -236,12 +235,12 @@ struct PatchbayView: View {
 
         // Add output devices
         let outputDeviceList = engine.availableOutputs().filter { $0.name != engine.passThruName }
-        for (index, device) in outputDeviceList.enumerated() {
+        for (_, device) in outputDeviceList.enumerated() {
             var ports: [Port] = []
             // Add input ports for output devices (they receive audio)
             for i in 0..<device.numOutputs {
                 let yPos = 40 + CGFloat(i) * 30
-                ports.append(Port(name: "In \(i+1)", isInput: true, uid: device.uid, local: CGPoint(x: 120, y: yPos)))
+                ports.append(Port(name: "In \(i+1)", device: device, index: i, isInput: true, uid: device.uid, local: CGPoint(x: 120, y: yPos)))
             }
             
             self.outputDevices.append(DeviceBox(
@@ -260,10 +259,11 @@ struct PatchbayView: View {
         tempPoint = location
     }
     
-    private func handleRelease(from: UUID, to: UUID) {
+    private func handleRelease(from: UUID, to: UUID?) {
         draggingFrom = nil
         tempPoint = CGPoint.zero
         
+        guard let to = to else { return }
         guard let fromPort = findPort(by: from),
               let toPort = findPort(by: to),
               !fromPort.isInput && toPort.isInput else {
@@ -277,16 +277,16 @@ struct PatchbayView: View {
             let connection = Connection(from: from, to: to)
             connections.append(connection)
             
-            // Create audio connection in backend using port UIDs directly
-            if let fromPortUID = fromPort.uid,
-               let toPortUID = toPort.uid {
-                engine.createAudioConnection(
+            do {
+                try engine.createAudioConnection(
                     id: connection.id,
-                    fromDeviceUID: fromPortUID,
-                    fromPort: 0, // Use 0 for now, we'll implement proper port indexing later
-                    toDeviceUID: toPortUID,
-                    toPort: 0
+                    fromPort: fromPort,
+                    toPort: toPort
                 )
+            } catch {
+                print("Error: Failed to create audio connection: \(error)")
+                // Remove the connection from the UI since the audio connection failed
+                connections.removeAll { $0.id == connection.id }
             }
         }
     }
@@ -348,20 +348,20 @@ struct PatchbayView: View {
         selectedConnection = selectedCables.map { $0.id }
     }
 
-    // Add helper function to find closest port
-    private func findClosestPort(at point: CGPoint) -> UUID {
+    private func findClosestPort(at point: CGPoint) -> UUID? {
+        let portRadius = portRadius
         var closestPort: UUID?
-        var minDistance: CGFloat = CGFloat.greatestFiniteMagnitude
-        
+        var minDistance = CGFloat.greatestFiniteMagnitude
+
         for (portId, portPos) in portPositions {
-            let distance = sqrt(pow(point.x - portPos.x, 2) + pow(point.y - portPos.y, 2))
-            if distance < minDistance {
+            let distance = hypot(point.x - portPos.x, point.y - portPos.y)
+            if distance < portRadius && distance < minDistance {
                 minDistance = distance
                 closestPort = portId
             }
         }
-        
-        return closestPort ?? UUID()
+
+        return closestPort
     }
 
     private func findDeviceForPort(_ port: Port) -> AudioDevice? {
@@ -374,7 +374,7 @@ struct PatchbayView: View {
                 } else if deviceBox.type == .output {
                     return engine.availableOutputs().first { $0.name == deviceBox.name }
                 } else if deviceBox.type == .passthru {
-                    return engine.getPassThru()
+                    return engine.passThruDevice()
                 }
             }
         }
@@ -441,7 +441,7 @@ final class MockRouterEngine: RouterEngine {
         ]
     }
     
-    override func getPassThru() -> AudioDevice {
+    func getPassThru() -> AudioDevice {
         AudioDevice(id: 5, name: "BlackHole 16ch", uid: "bh", numOutputs: 16, numInputs: 16)
     }
 }

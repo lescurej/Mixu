@@ -183,8 +183,6 @@ final class CableManagerNSView: NSView {
     }
     
     private func handleLocalMouseDown(_ event: NSEvent) {
-        guard let window = window else { return }
-        
         let windowPoint = event.locationInWindow
         let viewPoint = convert(windowPoint, from: nil)
         

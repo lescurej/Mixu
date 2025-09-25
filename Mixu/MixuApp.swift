@@ -6,9 +6,10 @@
 //
 
 import SwiftUI
+import AVFoundation
 
 @main
-struct MixuApp: App {
+struct MixuApp: App {    
     var body: some Scene {
         WindowGroup { ContentView() }
     }

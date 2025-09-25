@@ -4,13 +4,25 @@ import SwiftUI
 
 enum DeviceType { case input, output, passthru }
 
-struct Port: Identifiable, Hashable {
+struct Port: Identifiable, Hashable, Equatable {    
     let id = UUID()
     var name: String
+    var device: AudioDevice
+    var index: Int
     var isInput: Bool          // input shown on right edge, output on left edge
     var uid: String?
     // Local offset inside the box (in points, from box's top-left)
     var local: CGPoint
+    
+    // MARK: - Hashable conformance
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    // MARK: - Equatable conformance
+    static func == (lhs: Port, rhs: Port) -> Bool {
+        return lhs.id == rhs.id
+    }
 }
 
 struct DeviceBox: Identifiable, Hashable {
@@ -19,11 +31,13 @@ struct DeviceBox: Identifiable, Hashable {
     var uid: String?
     var size: CGSize
     var origin: CGPoint        // Top-left position in the "patch" coordinate space
-    var ports: [Port]
+    var ports: [Port] = []
     var type: DeviceType
 }
 
 // MARK: - View
+
+var portRadius: CGFloat = 12                    
 
 struct DeviceBoxView: View {
     @Binding var device: DeviceBox
@@ -34,7 +48,7 @@ struct DeviceBoxView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: portRadius)
                 .fill(Color.gray.opacity(0.2))
                 .frame(width: device.size.width, height: device.size.height)
 
@@ -138,22 +152,26 @@ extension CGRect {
         CGPoint(x: midX, y: midY)
     }
 }
+
+/*
 // MARK: - Preview
 
 #Preview {
+    var device = DeviceBox(
+        name: "Test Device",
+        uid: nil,
+        size: CGSize(width: 120, height: 100),
+        origin: CGPoint(x: 100, y: 100),
+        type: .output
+    )
     let ports = [
-        Port(name: "In 1", isInput: false, uid: nil, local: CGPoint(x: 0,    y: 30)),
-        Port(name: "Out 1",  isInput: true,  uid: nil, local: CGPoint(x: 120,  y: 70))
+        Port(name: "In 1", device: device, index: 0, isInput: false, uid: nil, local: CGPoint(x: 0,    y: 30)),
+        Port(name: "Out 1", device: device, index: 0,  isInput: true, uid: nil, local: CGPoint(x: 120,  y: 70))
     ]
-    return DeviceBoxView(
-        device: .constant(DeviceBox(
-            name: "Test Device",
-            uid: nil,
-            size: CGSize(width: 120, height: 100),
-            origin: CGPoint(x: 100, y: 100),
-            ports: ports,
-            type: .output
-        )),
+    device.ports.append(contentsOf: ports)
+    
+    DeviceBoxView(
+        device: .constant(device),
         draggingFrom: .constant(nil),
         tempPoint: .constant(.zero),
         onDrag: { device, _, _ in },
@@ -163,3 +181,4 @@ extension CGRect {
     .background(Color.black)
     .coordinateSpace(name: "patch")
 }
+*/

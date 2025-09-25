@@ -9,12 +9,22 @@ import AudioToolbox
 import CoreAudio
 
 // MARK: - AudioDevice Query Helpers
-struct AudioDevice {
+struct AudioDevice: Hashable {
     let id: AudioDeviceID
     let name: String
     let uid: String
     let numOutputs: Int
     let numInputs: Int
+    
+    // MARK: - Hashable conformance
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    // MARK: - Equatable conformance
+    static func == (lhs: AudioDevice, rhs: AudioDevice) -> Bool {
+        return lhs.id == rhs.id
+    }
 }
 
 enum DeviceScope {
@@ -23,6 +33,108 @@ enum DeviceScope {
 }
 
 final class AudioDeviceManager {
+    private var deviceChangeListeners: [AudioDeviceID: AudioObjectPropertyListenerProc] = [:]
+    private var listenerContexts: [AudioDeviceID: UnsafeMutableRawPointer] = [:]
+    private var connectedDeviceIDs: Set<AudioDeviceID> = []
+    
+    init() {
+        // Don't set up listeners in init - wait for devices to be connected
+    }
+    
+    deinit {
+        removeAllDeviceChangeListeners()
+    }
+    
+    func addDeviceChangeListener(for deviceID: AudioDeviceID) {
+        // Only add listener if not already listening
+        guard !connectedDeviceIDs.contains(deviceID) else { return }
+        
+        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        listenerContexts[deviceID] = selfPointer
+        
+        let listener: AudioObjectPropertyListenerProc = { (objectID, numAddresses, addresses, clientData) -> OSStatus in
+            guard let clientData = clientData else { return noErr }
+            let manager = Unmanaged<AudioDeviceManager>.fromOpaque(clientData).takeUnretainedValue()
+            return manager.handleDevicePropertyChange(objectID: objectID, addresses: addresses, numAddresses: numAddresses)
+        }
+        
+        deviceChangeListeners[deviceID] = listener
+        
+        // Listen for stream format changes on this specific device
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        
+        let status = AudioObjectAddPropertyListener(
+            deviceID,
+            &address,
+            listener,
+            selfPointer
+        )
+        
+        if status != noErr {
+            print("Failed to add device property listener for device \(deviceID): \(status)")
+            deviceChangeListeners.removeValue(forKey: deviceID)
+            listenerContexts.removeValue(forKey: deviceID)
+        } else {
+            connectedDeviceIDs.insert(deviceID)
+            print("Added format change listener for device \(deviceID)")
+        }
+    }
+    
+    func removeDeviceChangeListener(for deviceID: AudioDeviceID) {
+        guard let listener = deviceChangeListeners[deviceID],
+              let context = listenerContexts[deviceID] else { return }
+        
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        
+        AudioObjectRemovePropertyListener(
+            deviceID,
+            &address,
+            listener,
+            context
+        )
+        
+        deviceChangeListeners.removeValue(forKey: deviceID)
+        listenerContexts.removeValue(forKey: deviceID)
+        connectedDeviceIDs.remove(deviceID)
+        
+        print("Removed format change listener for device \(deviceID)")
+    }
+    
+    private func removeAllDeviceChangeListeners() {
+        for deviceID in connectedDeviceIDs {
+            removeDeviceChangeListener(for: deviceID)
+        }
+    }
+    
+    private func handleDevicePropertyChange(objectID: AudioObjectID, addresses: UnsafePointer<AudioObjectPropertyAddress>, numAddresses: UInt32) -> OSStatus {
+        // Only process if this is a connected device
+        guard connectedDeviceIDs.contains(objectID) else { return noErr }
+        
+        // Check if this is a device format change
+        for i in 0..<Int(numAddresses) {
+            let address = addresses[i]
+            if address.mSelector == kAudioDevicePropertyStreamFormat {
+                // Notify that a device format has changed
+                NotificationCenter.default.post(
+                    name: .audioDeviceFormatChanged,
+                    object: nil,
+                    userInfo: ["deviceID": objectID]
+                )
+                print("Format change detected for connected device \(objectID)")
+            }
+        }
+        
+        return noErr
+    }
+
     func allDevices() -> [AudioDevice] {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -132,9 +244,7 @@ final class AudioDeviceManager {
         var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
 
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &asbd)
-        guard status == noErr else {
-            return nil
-        }
+        guard status == noErr else { return nil }
 
         return StreamFormat(asbd: asbd)
     }
@@ -180,4 +290,8 @@ final class AudioDeviceManager {
 
         return allDevices().first(where: { $0.uid == uid })?.id
     }
+}
+
+extension Notification.Name {
+    static let audioDeviceFormatChanged = Notification.Name("audioDeviceFormatChanged")
 }

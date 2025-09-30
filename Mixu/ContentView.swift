@@ -1,15 +1,3 @@
-// Open‑Source Loopback Router — Swift Skeleton (macOS)
-// Goals
-// - Expose a *virtual* output device to apps (use BlackHole you installed)
-// - Our app reads from that virtual device and routes to one or more *physical* devices
-// - Robust to jitter/clock drift: per‑destination async SRC with tiny ppm correction
-// - Swift + CoreAudio AudioUnits (HAL) for multi‑device fan‑out
-//
-// Notes
-// - This is a *skeleton*: it outlines safe patterns, error checks, and the architecture.
-// - You still need to add your code signing, entitlement for audio, and ship BlackHole or instruct the user to install it.
-// - For clarity, this file keeps everything together. In practice, split into modules.
-
 import os.log
 import SwiftUI
 import AVFoundation
@@ -27,18 +15,38 @@ func check(_ status: OSStatus, _ message: String) -> OSStatus {
     return status
 }
 
-// MARK: - Minimal SwiftUI GUI
 struct ContentView: View {
     @StateObject var engine = RouterEngine()
-    @State var running = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Mixu").font(.title).bold()
+            HStack () {
+                Text("Mixu").font(.title).bold()
+            }
             Divider()
             PatchbayView(engine: engine)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(16)
+    }
+}
+
+
+final class MockRouterEngine: RouterEngine {
+    override func availableInputs() -> [AudioDevice] {
+        [.init(id: 1, name: "Built-in Mic", uid: "mic", numOutputs: 0, numInputs: 2),
+         .init(id: 2, name: "Virtual Mic", uid: "vmic", numOutputs: 0, numInputs: 4)]
+    }
+    override func availableOutputs() -> [AudioDevice] {
+        [.init(id: 3, name: "Speakers", uid: "spk", numOutputs: 2, numInputs: 0),
+         .init(id: 4, name: "USB Interface", uid: "usb", numOutputs: 8, numInputs: 0)]
+    }
+    override func passThruDevice() -> AudioDevice? {
+        .init(id: 5, name: "BlackHole 16ch", uid: "bh", numOutputs: 16, numInputs: 16)
+    }
+    
+    override func availableAudioUnitEffects(includeMusicEffects: Bool = false) -> [AudioPluginDescriptor] {
+        [.init(name: "Plugin 1", audioUnitDescription: AudioComponentDescription()),.init(name: "Plugin 2", audioUnitDescription: AudioComponentDescription())]
     }
 }
 

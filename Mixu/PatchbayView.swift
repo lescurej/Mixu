@@ -1,8 +1,6 @@
 import SwiftUI
-import CoreAudio
-import AppKit
 import AVFoundation
-import os.log
+import UniformTypeIdentifiers
 
 struct Connection: Identifiable, Hashable {
     let id = UUID()
@@ -12,401 +10,549 @@ struct Connection: Identifiable, Hashable {
 
 struct PatchbayView: View {
     @ObservedObject var engine: RouterEngine
-    
-    @State private var inputDevices: [DeviceBox] = []
-    @State private var outputDevices: [DeviceBox] = []
-    @State private var passThruDevice: [DeviceBox] = []
+
+    @State private var availableInputs: [AudioDevice] = []
+    @State private var availableOutputs: [AudioDevice] = []
+    @State private var passthruDevice: AudioDevice? = nil
+    @State private var availablePlugins: [AudioPluginDescriptor] = []
+
+    @State private var placedBoxes: [DeviceBox] = []
+    @State private var lockedSidebarItems: Set<String> = []
+
     @State private var connections: [Connection] = []
+    @State private var portCenters: [UUID: CGPoint] = [:]
     @State private var draggingFrom: UUID? = nil
     @State private var tempPoint: CGPoint = .zero
-    @State private var portPositions: [UUID: CGPoint] = [:]
-    @State private var selectedConnection: [UUID] = []
-    @State private var hoveredConnection: UUID? = nil
-    
-    @State private var marqueeStart: CGPoint? = nil
-    @State private var marqueeCurrent: CGPoint? = nil
-    @State private var isMarqueeing: Bool = false
-    
-    // Extracted connections layer
-    private func connectionViews() -> some View {
-        CableManagerViewWithGestures(
-            connections: connections,
-            portPositions: portPositions,
-            selectedConnection: selectedConnection,
-            hoveredConnection: hoveredConnection,
-            onHover: { cableId in
-                hoveredConnection = cableId
-            },
-            onClick: { cableId in
-                handleCableSelection(cableId)
-            },
-        )
-    }
+
+    @State private var isDropTargeted = false
+    @State private var patchSize: CGSize = .zero
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                ZStack {
-                    Color.black.opacity(0.0)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedConnection = []
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    if marqueeStart == nil {
-                                        marqueeStart = value.startLocation
-                                    }
-                                    marqueeCurrent = value.location
-                                    isMarqueeing = true
-                                }
-                                .onEnded { value in
-                                    if let start = marqueeStart, let current = marqueeCurrent {
-                                        let marqueeRect = CGRect(
-                                            x: min(start.x, current.x),
-                                            y: min(start.y, current.y),
-                                            width: abs(current.x - start.x),
-                                            height: abs(current.y - start.y)
-                                        )
-                                        handleMarqueeEnd(marqueeRect)
-                                    }
-                                    marqueeStart = nil
-                                    marqueeCurrent = nil
-                                    isMarqueeing = false
-                                }
-                        )
-                    
-                    connectionViews()
-                    
-                    Canvas { ctx, _ in
-                        if let fromId = draggingFrom, let fromPos = portPositions[fromId] {
-                            ctx.stroke(curvePath(fromPos, tempPoint),
-                                       with: .color(.orange),
-                                       style: StrokeStyle(lineWidth: 2, dash: [6]))
-                        }
-                    }
-                     .allowsHitTesting(false)
-                    
-                  
-                    HStack(alignment: .top) {
-                        VStack(spacing: 40.0){
-                            ForEach($inputDevices) { $device in
-                                DeviceBoxView(
-                                    device: $device,
-                                    draggingFrom: $draggingFrom,
-                                    tempPoint: $tempPoint,
-                                    onDrag: handleDrag,
-                                    onRelease: { deviceBox, fromPortId, point in
-                                        handleRelease(from: fromPortId, to: findClosestPort(at: point))
-                                    }
-                                )
-                            }
-                        }
-                        .padding(10.0)
-                        .frame(width: geometry.size.width/3)
-                        
-                        VStack(spacing: 40.0){
-                            ForEach($passThruDevice) { $device in
-                                DeviceBoxView(
-                                    device: $device,
-                                    draggingFrom: $draggingFrom,
-                                    tempPoint: $tempPoint,
-                                    onDrag: handleDrag,
-                                    onRelease: { deviceBox, fromPortId, point in
-                                        handleRelease(from: fromPortId, to: findClosestPort(at: point))
-                                    }
-                                )
-                            }
-                        }
-                        .padding(10.0)
-                        .frame(width: geometry.size.width/3)
-                        
-                        VStack(spacing: 40.0){
-                            ForEach($outputDevices) { $device in
-                                DeviceBoxView(
-                                    device: $device,
-                                    draggingFrom: $draggingFrom,
-                                    tempPoint: $tempPoint,
-                                    onDrag: handleDrag,
-                                    onRelease: { deviceBox, fromPortId, point in
-                                        handleRelease(from: fromPortId, to: findClosestPort(at: point))
-                                    }
-                                )
-                            }
-                            
-                        }
-                        .padding(10.0)
-                        .frame(width: geometry.size.width/3)
-                    }
-                    
-                    // Marquee rectangle on top
-                    if let start = marqueeStart, let current = marqueeCurrent {
-                        Rectangle()
-                            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
-                            .background(Rectangle().fill(Color.blue.opacity(0.1)))
-                            .frame(width: abs(current.x - start.x),
-                                   height: abs(current.y - start.y))
-                            .position(x: (start.x + current.x) / 2,
-                                      y: (start.y + current.y) / 2)
-                    }
-                    
-                }
-                .coordinateSpace(name: "patch")
-                .onPreferenceChange(PortPositionPreferenceKey.self) { positions in
-                    updatePortPositions(positions)
-                }
-                .onAppear {
-                    initializeDevices()
-                }
-            }
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            patchSurface
         }
-        .onKeyDown { event in
-            switch event.keyCode {
-            case 51:
-                deleteSelectedConnections()
-            default:
-                break
-            }
-        }
-    }
-    
-    private func updatePortPositions(_ positions: [CGPoint]) {
-        let allDevices = inputDevices + passThruDevice + outputDevices
-        for (index, position) in positions.enumerated() {
-            if index < allDevices.flatMap({ $0.ports }).count {
-                let portId = allDevices.flatMap({ $0.ports })[index].id
-                portPositions[portId] = position
-            }
-        }
-    }
-    
-    private func initializeDevices() {
-        let deviceWidth: CGFloat = 120
-        
-        // Clear existing devices
-        inputDevices.removeAll()
-        outputDevices.removeAll()
-        passThruDevice.removeAll()
-        
-        // Add input devices (devices with inputs)
-        let inputDeviceList = engine.availableInputs().filter { $0.name != engine.passThruName }
-        for (index, device) in inputDeviceList.enumerated() {
-            var ports: [Port] = []
-            
-            // Add output ports for input devices (they send audio)
-            for i in 0..<device.numInputs {
-                let yPos = 40 + CGFloat(i) * 30
-                ports.append(Port(name: "Out \(i+1)", isInput: false, uid: device.uid, local: CGPoint(x: 0, y: yPos)))
-            }
-            
-            self.inputDevices.append(DeviceBox(
-                name: device.name,
-                uid: device.uid,
-                size: CGSize(width: deviceWidth, height: CGFloat(device.numInputs) * 30 + 50),
-                origin: CGPoint(x: 0, y: 0),
-                ports: ports,
-                type: .input
-            ))
-        }
-                
-        // Add passthru device
-        let passthru = engine.getPassThru()
-        var passthruPorts: [Port] = []
-        // Add input ports for passthru
-        for i in 0..<passthru.numInputs {
-            let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "In \(i+1)", isInput: true, uid: passthru.uid, local: CGPoint(x: 120, y: yPos)))
-        }
-        
-        // Add output ports for passthru
-        for i in 0..<passthru.numOutputs {
-            let yPos = 40 + CGFloat(i) * 30
-            passthruPorts.append(Port(name: "Out \(i+1)", isInput: false, uid: passthru.uid, local: CGPoint(x: 0, y: yPos)))
-        }
-        
-        self.passThruDevice.append(DeviceBox(
-            name: passthru.name,
-            uid: passthru.uid,
-            size: CGSize(width: deviceWidth, height: (max(CGFloat(passthru.numInputs),CGFloat(passthru.numOutputs)) * 30.0 + 50.0)),
-            origin: CGPoint(x: 0, y: 0),
-            ports: passthruPorts,
-            type: .passthru
-        ))
-
-        // Add output devices
-        let outputDeviceList = engine.availableOutputs().filter { $0.name != engine.passThruName }
-        for (index, device) in outputDeviceList.enumerated() {
-            var ports: [Port] = []
-            // Add input ports for output devices (they receive audio)
-            for i in 0..<device.numOutputs {
-                let yPos = 40 + CGFloat(i) * 30
-                ports.append(Port(name: "In \(i+1)", isInput: true, uid: device.uid, local: CGPoint(x: 120, y: yPos)))
-            }
-            
-            self.outputDevices.append(DeviceBox(
-                name: device.name,
-                uid: device.uid,
-                size: CGSize(width: deviceWidth, height: CGFloat(device.numOutputs) * 30 + 50),
-                origin: CGPoint(x: 0, y: 0),
-                ports: ports,
-                type: .output
-            ))
-        }
-    }
-    
-    private func handleDrag(device: DeviceBox, fromId: UUID, location: CGPoint) {
-        draggingFrom = fromId
-        tempPoint = location
-    }
-    
-    private func handleRelease(from: UUID, to: UUID) {
-        draggingFrom = nil
-        tempPoint = CGPoint.zero
-        
-        guard let fromPort = findPort(by: from),
-              let toPort = findPort(by: to),
-              !fromPort.isInput && toPort.isInput else {
-            return
-        }
-        
-        let fromId = fromPort.id
-        let toId = toPort.id
-        
-        if connections.contains(where: { $0.from == fromId && $0.to == toId }) == false {
-            let connection = Connection(from: from, to: to)
-            connections.append(connection)
-            
-            // Create audio connection in backend using port UIDs directly
-            if let fromPortUID = fromPort.uid,
-               let toPortUID = toPort.uid {
-                engine.createAudioConnection(
-                    id: connection.id,
-                    fromDeviceUID: fromPortUID,
-                    fromPort: 0, // Use 0 for now, we'll implement proper port indexing later
-                    toDeviceUID: toPortUID,
-                    toPort: 0
-                )
-            }
-        }
-    }
-
-    private func handleCableSelection(_ cableId: UUID?) {
-        guard let cableId = cableId else {
-            selectedConnection = []
-            return
-        }
-        
-        // Check if shift key is pressed
-        let isShiftPressed = NSEvent.modifierFlags.contains(.shift)
-        
-        if isShiftPressed {
-            // Multi-selection mode
-            if selectedConnection.contains(cableId) {
-                // Remove from selection if already selected
-                selectedConnection.removeAll { $0 == cableId }
-            } else {
-                // Add to selection
-                selectedConnection.append(cableId)
-            }
-        } else {
-            // Single selection mode
-            selectedConnection = [cableId]
-        }
-    }
-
-    private func deleteSelectedConnections() {
-        guard !selectedConnection.isEmpty else { return }
-        
-        // Remove audio connections from backend
-        for connectionId in selectedConnection {
-            engine.removeAudioConnection(id: connectionId)
-        }
-        
-        // Remove GUI connections
-        connections.removeAll { connection in
-            selectedConnection.contains(connection.id)
-        }
-        selectedConnection = []
-    }
-
-    private func handleMarqueeEnd(_ marqueeRect: CGRect) {
-        let selectedCables = connections.filter { connection in
-            guard let fromPos = portPositions[connection.from],
-                  let toPos = portPositions[connection.to] else { return false }
-            
-            let cableRect = CGRect(
-                x: min(fromPos.x, toPos.x) - 10,
-                y: min(fromPos.y, toPos.y) - 10,
-                width: abs(toPos.x - fromPos.x) + 20,
-                height: abs(toPos.y - fromPos.y) + 20
-            )
-            
-            return marqueeRect.intersects(cableRect)
-        }
-        
-        selectedConnection = selectedCables.map { $0.id }
-    }
-
-    // Add helper function to find closest port
-    private func findClosestPort(at point: CGPoint) -> UUID {
-        var closestPort: UUID?
-        var minDistance: CGFloat = CGFloat.greatestFiniteMagnitude
-        
-        for (portId, portPos) in portPositions {
-            let distance = sqrt(pow(point.x - portPos.x, 2) + pow(point.y - portPos.y, 2))
-            if distance < minDistance {
-                minDistance = distance
-                closestPort = portId
-            }
-        }
-        
-        return closestPort ?? UUID()
-    }
-
-    private func findDeviceForPort(_ port: Port) -> AudioDevice? {
-        let allDevices = inputDevices + passThruDevice + outputDevices
-        
-        for deviceBox in allDevices {
-            if deviceBox.ports.contains(where: { $0.id == port.id }) {
-                if deviceBox.type == .input {
-                    return engine.availableInputs().first { $0.name == deviceBox.name }
-                } else if deviceBox.type == .output {
-                    return engine.availableOutputs().first { $0.name == deviceBox.name }
-                } else if deviceBox.type == .passthru {
-                    return engine.getPassThru()
-                }
-            }
-        }
-        return nil
-    }
-
-    private func getPortIndex(_ port: Port, in device: AudioDevice) -> Int {
-        let allDevices = inputDevices + passThruDevice + outputDevices
-        
-        for deviceBox in allDevices {
-            if deviceBox.name == device.name {
-                if let index = deviceBox.ports.firstIndex(where: { $0.id == port.id }) {
-                    return index
-                }
-            }
-        }
-        return 0
-    }
-
-    private func findPort(by id: UUID) -> Port? {
-        let allDevices = inputDevices + passThruDevice + outputDevices
-        
-        for deviceBox in allDevices {
-            if let port = deviceBox.ports.first(where: { $0.id == id }) {
-                return port
-            }
-        }
-        return nil
+        .background(Color.black.opacity(0.92))
+        .onAppear { reloadCatalog() }
     }
 }
 
-// MARK: - Helpers
+private extension PatchbayView {
+    var sidebar: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                sidebarSection(
+                    title: "ENTRÉES",
+                    color: .blue,
+                    items: availableInputs.map { SidebarItem(device: $0, type: .input) }
+                )
+                if let passthruDevice {
+                    sidebarSection(
+                        title: "PASS-THRU",
+                        color: .orange,
+                        items: [SidebarItem(device: passthruDevice, type: .passthru)]
+                    )
+                }
+                sidebarSection(
+                    title: "SORTIES",
+                    color: .green,
+                    items: availableOutputs.map { SidebarItem(device: $0, type: .output) }
+                )
+                sidebarSection(
+                    title: "PLUG-INS",
+                    color: .purple,
+                    items: availablePlugins.map { SidebarItem(plugin: $0) }
+                )
+            }
+            .padding(.vertical, 22)
+            .padding(.horizontal, 16)
+        }
+        .frame(width: 260)
+        .background(Color.black.opacity(0.78))
+    }
+
+    @ViewBuilder
+    func sidebarSection(title: String, color: Color, items: [SidebarItem]) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(color.opacity(0.75))
+                    .textCase(.uppercase)
+                ForEach(items) { item in
+                    sidebarRow(for: item, accent: color)
+                }
+            }
+        }
+    }
+
+    func sidebarRow(for item: SidebarItem, accent: Color) -> some View {
+        let disabled = lockedSidebarItems.contains(item.id) && !item.allowsMultiplePlacement
+        return HStack(spacing: 10) {
+            Image(systemName: item.iconName)
+                .frame(width: 18)
+                .foregroundStyle(accent)
+            Text(item.title)
+                .font(.callout)
+                .foregroundStyle(Color.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(accent.opacity(disabled ? 0.12 : 0.2))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(accent.opacity(disabled ? 0.0 : 0.35), lineWidth: 1)
+        )
+        .opacity(disabled ? 0.35 : 1)
+        .onDrag {
+            let provider = NSItemProvider(object: NSString(string: item.id))
+            provider.suggestedName = item.title
+            return provider
+        }
+        .disabled(disabled)
+    }
+
+    var patchSurface: some View {
+        GeometryReader { geo in
+            let bounds = geo.size
+            ZStack {
+                Color.black.opacity(0.82)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18)
+                            .stroke(Color.white.opacity(0.04), lineWidth: 1)
+                    )
+                    .ignoresSafeArea()
+
+                Canvas { ctx, _ in
+                    for connection in connections {
+                        if let from = portCenters[connection.from], let to = portCenters[connection.to] {
+                            ctx.stroke(curve(from, to), with: .color(.blue.opacity(0.9)), lineWidth: 3)
+                        }
+                    }
+
+                    if let from = draggingFrom, let start = portCenters[from] {
+                        ctx.stroke(
+                            curve(start, tempPoint),
+                            with: .color(.orange),
+                            style: StrokeStyle(lineWidth: 2, dash: [6, 4])
+                        )
+                    }
+                }
+                .allowsHitTesting(false)
+
+                ForEach($placedBoxes) { $box in
+                    DeviceBoxView(
+                        device: $box,
+                        draggingFrom: $draggingFrom,
+                        tempPoint: $tempPoint,
+                        onDrag: { _, fromId, location in
+                            draggingFrom = fromId
+                            tempPoint = location
+                        },
+                        onRelease: { _, fromPortId, location in
+                            handleConnectionDrop(fromId: fromPortId, location: location)
+                            draggingFrom = nil
+                        },
+                        onMove: { updated in
+                            updatePosition(for: updated, bounds: bounds)
+                        }
+                    )
+                }
+
+                if placedBoxes.isEmpty {
+                    Text("Glissez-déposez des périphériques ici")
+                        .font(.callout)
+                        .foregroundColor(.white.opacity(0.4))
+                        .padding(12)
+                }
+            }
+            .padding(16)
+            .coordinateSpace(name: "patch")
+            .onAppear {
+                updatePatchSizeIfNeeded(bounds)
+            }
+            .onChange(of: bounds) { _, newBounds in
+                updatePatchSizeIfNeeded(newBounds)
+            }
+            .onDrop(
+                of: [UTType.plainText],
+                delegate: SidebarDropDelegate(
+                    onHighlight: { isDropTargeted = $0 },
+                    perform: { identifier, location in
+                        handleSidebarDrop(identifier: identifier, location: location, bounds: bounds)
+                    }
+                )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(Color.blue.opacity(isDropTargeted ? 0.45 : 0), lineWidth: 2)
+            )
+        }
+    }
+
+    func handleSidebarDrop(identifier: String, location: CGPoint, bounds: CGSize) -> Bool {
+        guard let item = allSidebarItems.first(where: { $0.id == identifier }) else { return false }
+
+        switch item.kind {
+        case let .device(device, type):
+            guard !lockedSidebarItems.contains(item.id) || item.allowsMultiplePlacement else { return false }
+            let box = makeDeviceBox(for: device, type: type, at: location, bounds: bounds)
+            placedBoxes.append(box)
+            if !item.allowsMultiplePlacement {
+                lockedSidebarItems.insert(item.id)
+            }
+            recomputePortCenters()
+            return true
+
+        case let .plugin(descriptor):
+            do {
+                try createPluginBox(descriptor: descriptor, at: location, bounds: bounds)
+                recomputePortCenters()
+                return true
+            } catch {
+                print("Failed to create plugin node: \(error)")
+                return false
+            }
+        }
+    }
+
+    func makeDeviceBox(for device: AudioDevice, type: DeviceType, at location: CGPoint, bounds: CGSize) -> DeviceBox {
+        let width: CGFloat = 220
+        let (outputCount, inputCount): (Int, Int) = {
+            switch type {
+            case .input:
+                return (max(device.numInputs, 1), 0)
+            case .output:
+                return (0, max(device.numOutputs, 1))
+            case .passthru:
+                return (max(device.numOutputs, 1), max(device.numInputs, 1))
+            case .plugin:
+                return (0, 0)
+            }
+        }()
+
+        let totalPorts = max(outputCount, inputCount)
+        let height = boxHeight(for: totalPorts)
+        var ports: [Port] = []
+
+        if outputCount > 0 {
+            for index in 0..<outputCount {
+                let y = portY(for: index, total: outputCount, height: height)
+                ports.append(
+                    Port(
+                        name: "Out \(index + 1)",
+                        device: device,
+                        pluginID: nil,
+                        index: index,
+                        isInput: false,
+                        uid: device.uid,
+                        local: CGPoint(x: 0, y: y)
+                    )
+                )
+            }
+        }
+
+        if inputCount > 0 {
+            for index in 0..<inputCount {
+                let y = portY(for: index, total: inputCount, height: height)
+                ports.append(
+                    Port(
+                        name: "In \(index + 1)",
+                        device: device,
+                        pluginID: nil,
+                        index: index,
+                        isInput: true,
+                        uid: device.uid,
+                        local: CGPoint(x: 0, y: y)
+                    )
+                )
+            }
+        }
+
+        var box = DeviceBox(
+            name: device.name,
+            uid: device.uid,
+            size: CGSize(width: width, height: height),
+            position: location,
+            ports: ports,
+            type: type
+        )
+        box.position = clampPosition(location, size: box.size, in: bounds)
+        return box
+    }
+
+    func createPluginBox(descriptor: AudioPluginDescriptor, at location: CGPoint, bounds: CGSize) throws {
+        let info = try engine.createPluginNode(descriptor: descriptor, channelCount: 2)
+        let channelCount = max(info.channelCount, 1)
+        let width: CGFloat = 220
+        let height = boxHeight(for: channelCount)
+
+        var ports: [Port] = []
+        for index in 0..<channelCount {
+            let y = portY(for: index, total: channelCount, height: height)
+            ports.append(
+                Port(
+                    name: "Out \(index + 1)",
+                    device: nil,
+                    pluginID: info.id,
+                    index: index,
+                    isInput: false,
+                    uid: nil,
+                    local: CGPoint(x: 0, y: y)
+                )
+            )
+        }
+        for index in 0..<channelCount {
+            let y = portY(for: index, total: channelCount, height: height)
+            ports.append(
+                Port(
+                    name: "In \(index + 1)",
+                    device: nil,
+                    pluginID: info.id,
+                    index: index,
+                    isInput: true,
+                    uid: nil,
+                    local: CGPoint(x: 0, y: y)
+                )
+            )
+        }
+
+        var box = DeviceBox(
+            name: info.name,
+            uid: nil,
+            size: CGSize(width: width, height: height),
+            position: location,
+            ports: ports,
+            type: .plugin,
+            pluginID: info.id
+        )
+        box.position = clampPosition(location, size: box.size, in: bounds)
+        placedBoxes.append(box)
+    }
+
+    func handleConnectionDrop(fromId: UUID, location: CGPoint) {
+        guard let fromPort = allPorts().first(where: { $0.id == fromId }) else { return }
+
+        let maybeTarget = portCenters
+            .filter { $0.key != fromId }
+            .min { a, b in
+                a.value.distance(to: location) < b.value.distance(to: location)
+            }?.key
+
+        guard
+            let toId = maybeTarget,
+            let toPort = allPorts().first(where: { $0.id == toId }),
+            fromPort.isInput != toPort.isInput,
+            let fromPoint = portCenters[fromId],
+            let toPoint = portCenters[toId]
+        else {
+            return
+        }
+
+        let hitRadius: CGFloat = 18
+        let valid = fromPoint.distance(to: location) <= hitRadius || toPoint.distance(to: location) <= hitRadius
+        guard valid else { return }
+
+        let (source, destination) = fromPort.isInput ? (toId, fromId) : (fromId, toId)
+        if !connections.contains(where: { $0.from == source && $0.to == destination }) {
+            connections.append(Connection(from: source, to: destination))
+        }
+
+        if !fromPort.isInput,
+           let uid = toPort.device?.uid,
+           let outputDevice = engine.availableOutputs().first(where: { $0.uid == uid }) {
+            engine.toggleOutput(outputDevice, enabled: true)
+        }
+    }
+
+    func updatePosition(for updatedDevice: DeviceBox, bounds: CGSize) {
+        guard let index = placedBoxes.firstIndex(where: { $0.id == updatedDevice.id }) else { return }
+        var device = updatedDevice
+        device.position = clampPosition(device.position, size: device.size, in: bounds)
+        placedBoxes[index] = device
+        recomputePortCenters()
+    }
+
+    func recomputePortCenters() {
+        var centers: [UUID: CGPoint] = [:]
+        for box in placedBoxes {
+            let originX = box.position.x - box.size.width / 2
+            let originY = box.position.y - box.size.height / 2
+            for port in box.ports {
+                let x = originX + (port.isInput ? box.size.width : 0)
+                let y = originY + port.local.y
+                centers[port.id] = CGPoint(x: x, y: y)
+            }
+        }
+        portCenters = centers
+    }
+
+    func reloadCatalog() {
+        availableInputs = engine.availableInputs().sorted { $0.name < $1.name }
+        availableOutputs = engine.availableOutputs().sorted { $0.name < $1.name }
+        passthruDevice = engine.passThruDevice()
+        availablePlugins = engine.availableAudioUnitEffects().sorted { $0.name < $1.name }
+
+        let validIdentifiers = Set(allSidebarItems.map(\.id))
+        lockedSidebarItems = lockedSidebarItems.filter { validIdentifiers.contains($0) }
+    }
+
+    func updatePatchSizeIfNeeded(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        guard patchSize != size else { return }
+
+        patchSize = size
+        placedBoxes = placedBoxes.map { box in
+            var updated = box
+            updated.position = clampPosition(box.position, size: box.size, in: size)
+            return updated
+        }
+        recomputePortCenters()
+    }
+
+    func clampPosition(_ position: CGPoint, size: CGSize, in bounds: CGSize) -> CGPoint {
+        guard bounds.width > 0, bounds.height > 0 else { return position }
+        let halfWidth = size.width / 2
+        let halfHeight = size.height / 2
+        let x = min(max(position.x, halfWidth), bounds.width - halfWidth)
+        let y = min(max(position.y, halfHeight), bounds.height - halfHeight)
+        return CGPoint(x: x, y: y)
+    }
+
+    func allPorts() -> [Port] {
+        placedBoxes.flatMap(\.ports)
+    }
+
+    func curve(_ a: CGPoint, _ b: CGPoint) -> Path {
+        var path = Path()
+        path.move(to: a)
+        let midX = (a.x + b.x) / 2
+        path.addCurve(
+            to: b,
+            control1: CGPoint(x: midX, y: a.y),
+            control2: CGPoint(x: midX, y: b.y)
+        )
+        return path
+    }
+
+    var allSidebarItems: [SidebarItem] {
+        var items: [SidebarItem] = []
+        items.append(contentsOf: availableInputs.map { SidebarItem(device: $0, type: .input) })
+        if let passthruDevice {
+            items.append(SidebarItem(device: passthruDevice, type: .passthru))
+        }
+        items.append(contentsOf: availableOutputs.map { SidebarItem(device: $0, type: .output) })
+        items.append(contentsOf: availablePlugins.map { SidebarItem(plugin: $0) })
+        return items
+    }
+
+    func boxHeight(for portCount: Int) -> CGFloat {
+        let minimumHeight: CGFloat = 120
+        let dynamicHeight = CGFloat(portCount + 1) * 22 + 24
+        return max(minimumHeight, dynamicHeight)
+    }
+
+    func portY(for index: Int, total: Int, height: CGFloat) -> CGFloat {
+        height / CGFloat(total + 1) * CGFloat(index + 1)
+    }
+}
+
+private struct SidebarItem: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case device(AudioDevice, DeviceType)
+        case plugin(AudioPluginDescriptor)
+    }
+
+    let id: String
+    let title: String
+    let kind: Kind
+    let iconName: String
+    let allowsMultiplePlacement: Bool
+
+    init(device: AudioDevice, type: DeviceType) {
+        self.id = "\(type.sidebarIdentifier).\(device.uid)"
+        self.title = device.name
+        self.kind = .device(device, type)
+        self.iconName = {
+            switch type {
+            case .input: return "arrow.down.right.circle"
+            case .output: return "arrow.up.right.circle"
+            case .passthru: return "arrow.left.and.right.circle"
+            case .plugin: return "slider.horizontal.3"
+            }
+        }()
+        self.allowsMultiplePlacement = false
+    }
+
+    init(plugin descriptor: AudioPluginDescriptor) {
+        self.id = "plugin.\(descriptor.id.uuidString)"
+        self.title = descriptor.name
+        self.kind = .plugin(descriptor)
+        self.iconName = "slider.horizontal.3"
+        self.allowsMultiplePlacement = true
+    }
+}
+
+private struct SidebarDropDelegate: DropDelegate {
+    let onHighlight: (Bool) -> Void
+    let perform: (String, CGPoint) -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [UTType.plainText])
+    }
+
+    func dropEntered(info: DropInfo) {
+        onHighlight(true)
+    }
+
+    func dropExited(info: DropInfo) {
+        onHighlight(false)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        onHighlight(false)
+        guard let provider = info.itemProviders(for: [UTType.plainText]).first else { return false }
+        let location = info.location
+        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, error in
+            guard error == nil else { return }
+            let identifier: String?
+            if let data = item as? Data {
+                identifier = String(data: data, encoding: .utf8)
+            } else if let string = item as? String {
+                identifier = string
+            } else if let nsString = item as? NSString {
+                identifier = nsString as String
+            } else {
+                identifier = nil
+            }
+            guard let identifier else { return }
+            DispatchQueue.main.async {
+                _ = perform(identifier, location)
+            }
+        }
+        return true
+    }
+}
+
+private extension DeviceType {
+    var sidebarIdentifier: String {
+        switch self {
+        case .input: return "input"
+        case .output: return "output"
+        case .passthru: return "passthru"
+        case .plugin: return "plugin"
+        }
+    }
+}
 
 extension CGPoint {
     func distance(to other: CGPoint) -> CGFloat {
@@ -414,40 +560,7 @@ extension CGPoint {
     }
 }
 
-func curvePath(_ from: CGPoint, _ to: CGPoint) -> Path {
-    let controlPoint1 = CGPoint(x: from.x + (to.x - from.x) * 0.5, y: from.y)
-    let controlPoint2 = CGPoint(x: to.x - (to.x - from.x) * 0.5, y: to.y)
-    
-    var path = Path()
-    path.move(to: from)
-    path.addCurve(to: to, control1: controlPoint1, control2: controlPoint2)
-    return path
-}
-
-// MARK: - Preview with Mock Engine
-
-final class MockRouterEngine: RouterEngine {
-    override func availableInputs() -> [AudioDevice] {
-        [
-            AudioDevice(id: 1, name: "Built-in Mic", uid: "mic1", numOutputs: 0, numInputs: 2),
-            AudioDevice(id: 2, name: "Virtual Mic", uid: "vmic", numOutputs: 0, numInputs: 4)
-        ]
-    }
-    
-    override func availableOutputs() -> [AudioDevice] {
-        [
-            AudioDevice(id: 3, name: "Speakers", uid: "spk", numOutputs: 2, numInputs: 0),
-            AudioDevice(id: 4, name: "USB Interface", uid: "usb", numOutputs: 8, numInputs: 0)
-        ]
-    }
-    
-    override func getPassThru() -> AudioDevice {
-        AudioDevice(id: 5, name: "BlackHole 16ch", uid: "bh", numOutputs: 16, numInputs: 16)
-    }
-}
-
 #Preview {
     PatchbayView(engine: MockRouterEngine())
         .frame(width: 1200, height: 800)
-        .background(Color.black.opacity(0.8))
 }

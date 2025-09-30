@@ -2,15 +2,28 @@ import SwiftUI
 
 // MARK: - Models
 
-enum DeviceType { case input, output, passthru }
+enum DeviceType { case input, output, passthru, plugin }
 
-struct Port: Identifiable, Hashable {
+struct Port: Identifiable, Hashable, Equatable {
     let id = UUID()
     var name: String
+    var device: AudioDevice?
+    var pluginID: UUID?
+    var index: Int
     var isInput: Bool          // input shown on right edge, output on left edge
     var uid: String?
     // Local offset inside the box (in points, from box's top-left)
     var local: CGPoint
+    
+    // MARK: - Hashable conformance
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    // MARK: - Equatable conformance
+    static func == (lhs: Port, rhs: Port) -> Bool {
+        return lhs.id == rhs.id
+    }
 }
 
 struct DeviceBox: Identifiable, Hashable {
@@ -18,12 +31,15 @@ struct DeviceBox: Identifiable, Hashable {
     var name: String
     var uid: String?
     var size: CGSize
-    var origin: CGPoint        // Top-left position in the "patch" coordinate space
-    var ports: [Port]
+    var position: CGPoint      // View center in the patch coordinate space
+    var ports: [Port] = []
     var type: DeviceType
+    var pluginID: UUID? = nil
 }
 
 // MARK: - View
+
+var portRadius: CGFloat = 12                    
 
 struct DeviceBoxView: View {
     @Binding var device: DeviceBox
@@ -31,12 +47,37 @@ struct DeviceBoxView: View {
     @Binding var tempPoint: CGPoint
     var onDrag: (DeviceBox, UUID, CGPoint) -> Void
     var onRelease: (DeviceBox, UUID, CGPoint) -> Void
+    var onMove: (DeviceBox) -> Void
+
+    @State private var dragStartPosition: CGPoint? = nil
 
     var body: some View {
+        let backgroundColor: Color = {
+            switch device.type {
+            case .input:
+                return Color.blue.opacity(0.2)
+            case .output:
+                return Color.green.opacity(0.2)
+            case .passthru:
+                return Color.orange.opacity(0.2)
+            case .plugin:
+                return Color.purple.opacity(0.25)
+            }
+        }()
+
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.gray.opacity(0.2))
+            RoundedRectangle(cornerRadius: portRadius)
+                .fill(backgroundColor)
                 .frame(width: device.size.width, height: device.size.height)
+                .overlay(
+                    RoundedRectangle(cornerRadius: portRadius)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+                .onDrag {
+                    let provider = NSItemProvider(object: NSString(string: device.id.uuidString))
+                    provider.suggestedName = device.name
+                    return provider
+                }
 
             // Name
             Text(device.name)
@@ -59,6 +100,33 @@ struct DeviceBoxView: View {
             }
         }
         .frame(width: device.size.width, height: device.size.height)
+        .position(device.position)
+        .gesture(boxDragGesture)
+        .onAppear { onMove(device) }
+    }
+
+    private var boxDragGesture: some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("patch"))
+            .onChanged { value in
+                guard draggingFrom == nil else { return }
+                if dragStartPosition == nil {
+                    dragStartPosition = device.position
+                }
+                if let start = dragStartPosition {
+                    device.position = CGPoint(x: start.x + value.translation.width,
+                                              y: start.y + value.translation.height)
+                    onMove(device)
+                }
+            }
+            .onEnded { value in
+                guard draggingFrom == nil else { dragStartPosition = nil; return }
+                if let start = dragStartPosition {
+                    device.position = CGPoint(x: start.x + value.translation.width,
+                                              y: start.y + value.translation.height)
+                    onMove(device)
+                }
+                dragStartPosition = nil
+            }
     }
 }
 
@@ -71,7 +139,6 @@ struct PortView: View {
     let onDrag: (UUID, CGPoint) -> Void
     let onReleased: (UUID, CGPoint) -> Void
     
-    @State private var globalPosition: CGPoint = .zero
     @State private var hovered: Bool = false
     
     var body: some View {
@@ -80,7 +147,6 @@ struct PortView: View {
             Circle()
                 .fill(port.isInput ? .green : .blue)
                 .frame(width: hovered ? hoveredCircleSize : normalCircleSize , height: hovered ? hoveredCircleSize : normalCircleSize)
-                .background(PortPositionReader())
                 .position(
                     x: port.isInput ? 0 : deviceSize.width ,
                     y: port.local.y
@@ -111,55 +177,4 @@ struct PortView: View {
                 )
         }
     }
-}
-
-struct PortPositionReader: View {
-    var body: some View {
-        GeometryReader { geo in
-            Color.clear
-                .preference(
-                    key: PortPositionPreferenceKey.self,
-                    value: [geo.frame(in: .named("patch")).center]
-                )
-        }
-    }
-}
-
-struct PortPositionPreferenceKey: PreferenceKey {
-    static var defaultValue: [CGPoint] = []
-    
-    static func reduce(value: inout [CGPoint], nextValue: () -> [CGPoint]) {
-        value.append(contentsOf: nextValue())
-    }
-}
-
-extension CGRect {
-    var center: CGPoint {
-        CGPoint(x: midX, y: midY)
-    }
-}
-// MARK: - Preview
-
-#Preview {
-    let ports = [
-        Port(name: "In 1", isInput: false, uid: nil, local: CGPoint(x: 0,    y: 30)),
-        Port(name: "Out 1",  isInput: true,  uid: nil, local: CGPoint(x: 120,  y: 70))
-    ]
-    return DeviceBoxView(
-        device: .constant(DeviceBox(
-            name: "Test Device",
-            uid: nil,
-            size: CGSize(width: 120, height: 100),
-            origin: CGPoint(x: 100, y: 100),
-            ports: ports,
-            type: .output
-        )),
-        draggingFrom: .constant(nil),
-        tempPoint: .constant(.zero),
-        onDrag: { device, _, _ in },
-        onRelease: { device, _, _ in },
-    )
-    .frame(width: 400, height: 300)
-    .background(Color.black)
-    .coordinateSpace(name: "patch")
 }

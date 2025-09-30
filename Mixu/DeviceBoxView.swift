@@ -148,7 +148,7 @@ struct PortView: View {
                 .fill(port.isInput ? .green : .blue)
                 .frame(width: hovered ? hoveredCircleSize : normalCircleSize , height: hovered ? hoveredCircleSize : normalCircleSize)
                 .position(
-                    x: port.isInput ? 0 : deviceSize.width ,
+                    x: port.isInput ? deviceSize.width : 0 ,
                     y: port.local.y
                 )
                 .onHover(perform: {hovered in self.hovered = hovered})
@@ -169,10 +169,10 @@ struct PortView: View {
                 .fontWeight(.thin)
                 .foregroundColor(.white)
                 .lineLimit(1)
-                .multilineTextAlignment(port.isInput ? .leading : .trailing )
+                .multilineTextAlignment(port.isInput ? .trailing : .leading )
                 .frame(width: 100.0)
                 .position(
-                    x: port.isInput ? 20: deviceSize.width - 20,
+                    x: port.isInput ? deviceSize.width - 20 : 20,
                     y: port.local.y
                 )
         }

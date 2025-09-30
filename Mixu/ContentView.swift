@@ -1,5 +1,6 @@
 import os.log
 import SwiftUI
+import AudioUnit
 
 // MARK: - Logging
 let log = OSLog(subsystem: "com.mixu.app", category: "audio")

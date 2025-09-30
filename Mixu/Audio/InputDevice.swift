@@ -9,27 +9,30 @@ import AudioToolbox
 
 // MARK: - Input Device (Real or Test Tone)
 final class InputDevice {
+    typealias SampleHandler = (_ buffer: UnsafePointer<Float>, _ frames: Int, _ channelCount: Int) -> Void
+
     private var unit: AudioUnit?
     private var timer: Timer?
     private let deviceID: AudioDeviceID
-    private var format: StreamFormat
-    private let ring: AudioRingBuffer
+    private var hardwareFormat: StreamFormat
+    private var internalFormat: StreamFormat
+    private let handler: SampleHandler
     private var sampleCount: Int = 0
     private var isRunning = false
     private var isTestTone = false
     private var callCount: Int = 0
     
     // Constants for test tone generation
-    private let sampleRate = 44100
     private let frequency = 440.0 // A4 note
     private let amplitude = 0.3
     private let framesPerBuffer = 512
     private let bufferCount = 3  // Number of buffers to keep filled
     
-    init(deviceID: AudioDeviceID, format: StreamFormat, ring: AudioRingBuffer) throws {
+    init(deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat, handler: @escaping SampleHandler) throws {
         self.deviceID = deviceID
-        self.format = format
-        self.ring = ring
+        self.hardwareFormat = deviceFormat
+        self.internalFormat = internalFormat
+        self.handler = handler
         
         // Determine if we should use test tone based on device ID
         isTestTone = (deviceID == 0)
@@ -85,22 +88,23 @@ final class InputDevice {
         print("✅ Device bound successfully")
         
         // Query the device's supported format
-        var deviceFormat = AudioStreamBasicDescription()
+        var deviceASBD = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let status = AudioUnitGetProperty(u!, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &deviceFormat, &size)
-        
+        let status = AudioUnitGetProperty(u!, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &deviceASBD, &size)
+
         if status == noErr {
-            print("📊 Device native format: \(deviceFormat.mSampleRate)Hz, \(deviceFormat.mChannelsPerFrame)ch")
-            print("📊 Format flags: \(deviceFormat.mFormatFlags)")
-            print("📊 Bits per channel: \(deviceFormat.mBitsPerChannel)")
-            print("📊 Bytes per frame: \(deviceFormat.mBytesPerFrame)")
+            print("📊 Device native format: \(deviceASBD.mSampleRate)Hz, \(deviceASBD.mChannelsPerFrame)ch")
+            print("📊 Format flags: \(deviceASBD.mFormatFlags)")
+            print("📊 Bits per channel: \(deviceASBD.mBitsPerChannel)")
+            print("📊 Bytes per frame: \(deviceASBD.mBytesPerFrame)")
+            hardwareFormat = StreamFormat(asbd: deviceASBD)
             
             // Check if non-interleaved
-            let isNonInterleaved = (deviceFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+            let isNonInterleaved = (deviceASBD.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
             print("📊 Format is \(isNonInterleaved ? "non-interleaved" : "interleaved")")
             
             // Create a new format that's always interleaved - safer and easier to handle
-            var newFormat = deviceFormat
+            var newFormat = deviceASBD
             newFormat.mFormatFlags &= ~kAudioFormatFlagIsNonInterleaved  // Clear non-interleaved flag
             newFormat.mBytesPerFrame = UInt32(4 * Int(newFormat.mChannelsPerFrame))
             newFormat.mBytesPerPacket = newFormat.mBytesPerFrame
@@ -112,11 +116,11 @@ final class InputDevice {
             }
             
             // Update our format to match
-            self.format = StreamFormat(asbd: newFormat)
+            internalFormat = StreamFormat(asbd: newFormat)
         } else {
             print("⚠️ Could not query device format, using default")
             // Fall back to our default format - ensure it's interleaved
-            var asbd = format.asbd
+            var asbd = internalFormat.asbd
             asbd.mFormatFlags &= ~kAudioFormatFlagIsNonInterleaved  // Clear non-interleaved flag
             asbd.mBytesPerFrame = UInt32(4 * Int(asbd.mChannelsPerFrame))
             asbd.mBytesPerPacket = asbd.mBytesPerFrame
@@ -127,7 +131,7 @@ final class InputDevice {
             }
             
             // Update our format
-            self.format = StreamFormat(asbd: asbd)
+            internalFormat = StreamFormat(asbd: asbd)
         }
         
         // Set up the render callback
@@ -163,19 +167,17 @@ final class InputDevice {
         
         if isTestTone {
             print("🎤 Starting test tone generator")
-            // Fill the buffer initially with multiple chunks
+            // Prime downstream consumers with a few buffers
             for _ in 0..<bufferCount {
-                generateTestTone()
+                emitTestTone(frames: framesPerBuffer)
             }
             
-            // Start a timer to keep the buffer filled
-            timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { [weak self] _ in
+            // Emit tone at roughly the buffer cadence
+            let sampleRate = internalFormat.sampleRate > 0 ? internalFormat.sampleRate : 44_100
+            let interval = Double(framesPerBuffer) / sampleRate
+            timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
                 guard let self = self, self.isRunning else { return }
-                
-                // Only generate more audio if the buffer is getting low
-                if self.ring.fillLevel() < 0.5 {
-                    self.generateTestTone()
-                }
+                self.emitTestTone(frames: self.framesPerBuffer)
             }
         } else {
             print("🎤 Starting real device input")
@@ -205,147 +207,106 @@ final class InputDevice {
         }
     }
     
-    private func generateTestTone() {
-        // Allocate buffer for stereo interleaved audio
-        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: framesPerBuffer * 2)
-        defer { buffer.deallocate() }
+    private func emitTestTone(frames: Int) {
+        let channels = max(Int(internalFormat.channelCount), 1)
+        let samples = frames * channels
+        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: samples)
         
-        // Generate sine wave
-        for i in 0..<framesPerBuffer {
-            let time = Double(sampleCount + i) / Double(sampleRate)
+        let sampleRate = internalFormat.sampleRate > 0 ? internalFormat.sampleRate : 44_100
+        for frame in 0..<frames {
+            let time = Double(sampleCount + frame) / sampleRate
             let sample = Float(amplitude * sin(2.0 * .pi * frequency * time))
-            
-            // Interleaved stereo (left, right)
-            buffer[i * 2] = sample
-            buffer[i * 2 + 1] = sample
+            for channel in 0..<channels {
+                buffer[frame * channels + channel] = sample
+            }
         }
-        
-        // Update sample count
-        sampleCount += framesPerBuffer
-        
-        // Write to ring buffer
-        ring.write(buffer, frames: framesPerBuffer)
-        
-        // Periodically log the buffer fill level
-        if sampleCount % (framesPerBuffer * 20) == 0 {
-            print("🎤 Generated test tone: buffer fill level: \(ring.fillLevel())")
+        sampleCount += frames
+        handler(buffer, frames, channels)
+        buffer.deallocate()
+    }
+    
+    private func mixTestTone(into buffer: UnsafeMutablePointer<Float>, frames: Int, channels: Int) {
+        let sampleRate = internalFormat.sampleRate > 0 ? internalFormat.sampleRate : 44_100
+        for frame in 0..<frames {
+            let time = Double(sampleCount + frame) / sampleRate
+            let sample = Float(amplitude * 0.25 * sin(2.0 * .pi * frequency * time))
+            for channel in 0..<channels {
+                buffer[frame * channels + channel] += sample
+            }
         }
+        sampleCount += frames
     }
     
     private func onRender(inNumberFrames: UInt32) -> OSStatus {
         guard let unit = unit else { return noErr }
-        
-        // Check if ring buffer is getting too full
-        let fillLevel = ring.fillLevel()
-        if fillLevel > 0.9 {
-            // Skip this frame to avoid buffer overflow
-            if callCount % 50 == 0 {
-                print("⚠️ Ring buffer nearly full (\(fillLevel)), skipping frame to prevent overflow")
-            }
-            callCount += 1
-            return noErr
-        }
-        
-        // Use a much simpler approach - allocate a single buffer for the audio data
-        let channels = Int(format.asbd.mChannelsPerFrame)
-        
-        // Create a buffer to hold the audio data
-        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: Int(inNumberFrames) * channels)
+
+        let channels = max(Int(internalFormat.channelCount), 1)
+        let frameCount = Int(inNumberFrames)
+        let sampleCountForBuffer = frameCount * channels
+
+        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: sampleCountForBuffer)
         defer { buffer.deallocate() }
-        
-        // Create a simple AudioBufferList
+
         var abl = AudioBufferList()
         abl.mNumberBuffers = 1
         abl.mBuffers.mNumberChannels = UInt32(channels)
         abl.mBuffers.mDataByteSize = inNumberFrames * UInt32(channels) * 4
         abl.mBuffers.mData = UnsafeMutableRawPointer(buffer)
-        
-        // Call AudioUnitRender to get the audio data
+
         var flags: AudioUnitRenderActionFlags = []
         var timestamp = AudioTimeStamp()
         timestamp.mFlags = [.sampleTimeValid, .hostTimeValid]
-        
-        // Call AudioUnitRender
+
         let status = AudioUnitRender(unit, &flags, &timestamp, 1, inNumberFrames, &abl)
-        
+
         if status != noErr {
             print("❌ AudioUnitRender failed: \(status)")
-            
-            // Fall back to test tone if we can't get audio from the device
-            generateTestTone()
-            
+            emitTestTone(frames: frameCount)
             callCount += 1
             return status
         }
-        
-        // Check if we got any audio data
+
         var maxSample: Float = 0.0
         var rmsLevel: Float = 0.0
-        
-        for i in 0..<min(Int(inNumberFrames) * channels, 100) {
-            let sample = abs(buffer[i])
-            maxSample = max(maxSample, sample)
-            rmsLevel += sample * sample
+        let analysisSamples = min(sampleCountForBuffer, 100)
+        if analysisSamples > 0 {
+            for i in 0..<analysisSamples {
+                let sample = abs(buffer[i])
+                maxSample = max(maxSample, sample)
+                rmsLevel += sample * sample
+            }
+            rmsLevel = sqrt(rmsLevel / Float(analysisSamples))
         }
-        
-        rmsLevel = sqrt(rmsLevel / Float(min(Int(inNumberFrames) * channels, 100)))
-        
-        // Only log occasionally to avoid spam
+
         callCount += 1
-        
-        // If the signal is too weak, amplify it significantly
+
         if maxSample < 0.01 {
-            // Amplify the signal to make it more audible
-            let gain: Float = 20.0 // Boost by 20x for very weak signals
-            for i in 0..<Int(inNumberFrames) * channels {
+            let gain: Float = 20.0
+            for i in 0..<sampleCountForBuffer {
                 buffer[i] *= gain
             }
-            
             if callCount % 100 == 0 {
                 print("🎤 Amplifying weak signal: original max \(maxSample), amplified max \(min(maxSample * gain, 1.0)), RMS: \(rmsLevel)")
             }
         } else if callCount % 100 == 0 {
-            print("🎤 Real device max sample: \(maxSample), RMS: \(rmsLevel), buffer fill level: \(fillLevel)")
+            print("🎤 Real device max sample: \(maxSample), RMS: \(rmsLevel)")
         }
-        
-        // Apply a noise gate to remove very low level noise
+
         let noiseGate: Float = 0.001
-        for i in 0..<Int(inNumberFrames) * channels {
+        for i in 0..<sampleCountForBuffer {
             if abs(buffer[i]) < noiseGate {
                 buffer[i] = 0.0
             }
         }
-        
-        // Write to ring buffer
-        ring.write(buffer, frames: Int(inNumberFrames))
-        
-        // If signal is extremely weak, mix in a test tone to verify routing
-        if maxSample < 0.0005 && callCount % 3 == 0 { // Only mix in occasionally to avoid constant tone
-            // Mix in a moderate test tone to verify routing
-            let mixBuffer = UnsafeMutablePointer<Float>.allocate(capacity: framesPerBuffer * 2)
-            defer { mixBuffer.deallocate() }
-            
-            // Generate sine wave at 25% amplitude
-            for i in 0..<framesPerBuffer {
-                let time = Double(sampleCount + i) / Double(sampleRate)
-                let sample = Float(amplitude * 0.25 * sin(2.0 * .pi * frequency * time))
-                
-                // Interleaved stereo (left, right)
-                mixBuffer[i * 2] = sample
-                mixBuffer[i * 2 + 1] = sample
-            }
-            
-            // Update sample count
-            sampleCount += framesPerBuffer
-            
-            // Write to ring buffer
-            ring.write(mixBuffer, frames: framesPerBuffer)
-            
+
+        if maxSample < 0.0005 && callCount % 3 == 0 {
+            mixTestTone(into: buffer, frames: frameCount, channels: channels)
             if callCount % 300 == 0 {
                 print("🎶 Mixed in test tone due to extremely weak signal")
             }
         }
-        
+
+        handler(buffer, frameCount, channels)
         return noErr
     }
 }

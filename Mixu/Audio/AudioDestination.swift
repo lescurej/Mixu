@@ -40,15 +40,15 @@ final class AudioDestination {
         print("🔊 AudioDestination.init: uid=\(uid), deviceID=\(deviceID)")
         print("  deviceFormat: \(deviceFormat.debugDescription)")
         print("  internalFormat: \(internalFormat.debugDescription)")
-        print("  deviceFormat channels: \(deviceFormat.channelCount)")
-        print("  deviceFormat sampleRate: \(deviceFormat.sampleRate)")
+        print("  deviceFormat channels: \(deviceFormat.asbd.mChannelsPerFrame)")
+        print("  deviceFormat sampleRate: \(deviceFormat.asbd.mSampleRate)")
         print("  channelOffset: \(channelOffset)")
         
         let proxy = RenderProxy()
 
         self.uid = uid
         self.internalFormat = internalFormat
-        self.channelCount = internalFormat.channelCount
+        self.channelCount = Int(internalFormat.channelCount)
         self.renderProxy = proxy
         let sink: OutputSink
         do {

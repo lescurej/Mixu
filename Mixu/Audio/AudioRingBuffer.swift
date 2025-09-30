@@ -9,6 +9,10 @@
 
 /// Lock-based Ring Buffer (Swift 6 safe).
 /// Single-producer / single-consumer. Uses OSAllocatedUnfairLock.
+///
+///
+import os
+
 final class AudioRingBuffer {
     private let capacityFrames: Int
     private let channels: Int

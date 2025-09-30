@@ -13,7 +13,7 @@ final class AudioSource {
     let uid: String
     private var input: InputDevice!
     private let lock = OSAllocatedUnfairLock()
-    let channelCount: Int
+    let channelCount: UInt32
 
     struct Route {
         let ring: AudioRingBuffer

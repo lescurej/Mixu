@@ -1,4 +1,5 @@
 import CoreAudio
+import AudioUnit
 
 // MARK: - Audio Graph
 enum ConnectionEndpoint: Equatable {
@@ -43,7 +44,7 @@ class RouterEngine: ObservableObject {
     private var plugins: [UUID: PluginNode] = [:]
     private var rings: [UUID: AudioRingBuffer] = [:]
 
-    private var canonicalFormat = StreamFormat.make(sampleRate: 48_000, channels: 1) // 1 channel internal format
+    private var canonicalFormat = StreamFormat.make(sampleRate: 48_000, channelCount: 1) // 1 channel internal format
 
     init() {
         refreshCanonicalFormat()
@@ -182,7 +183,7 @@ class RouterEngine: ObservableObject {
         guard requested > Int(canonicalFormat.channelCount) else { return }
         let oldFormat = canonicalFormat
         canonicalFormat = StreamFormat.make(sampleRate: canonicalFormat.sampleRate,
-                                            channels: UInt32(requested))
+                                            channelCount: UInt32(requested))
         updateExistingDevicesForNewFormat(oldFormat: oldFormat, newFormat: canonicalFormat)
         for plugin in plugins.values {
             plugin.reinitializeChain(with: canonicalFormat)
@@ -542,7 +543,7 @@ private extension RouterEngine {
     func updateInternalFormat(to newSampleRate: Double) {
         let oldFormat = canonicalFormat
         let channels = max(1, canonicalFormat.channelCount)
-        canonicalFormat = StreamFormat.make(sampleRate: newSampleRate, channels: UInt32(channels))
+        canonicalFormat = StreamFormat.make(sampleRate: newSampleRate, channelCount: UInt32(channels))
         
         print("Internal format updated: sampleRate=\(canonicalFormat.sampleRate), channels=\(canonicalFormat.channelCount)")
         
@@ -660,7 +661,7 @@ private extension RouterEngine {
         }
         
         // Create internal format: 32-bit float, 1 channel, max sample rate from connected devices
-        canonicalFormat = StreamFormat.make(sampleRate: maxSampleRate, channels: 1)
+        canonicalFormat = StreamFormat.make(sampleRate: maxSampleRate, channelCount: 1)
         print("Internal format set to: sampleRate=\(canonicalFormat.sampleRate), channels=\(canonicalFormat.channelCount) (based on \(connectedDevices.count) connected devices)")
     }
 

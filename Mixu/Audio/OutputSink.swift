@@ -190,8 +190,8 @@ private extension OutputSink {
         let deviceChannels = Int(deviceASBD.mChannelsPerFrame)
 
         var framesProvided = 0
-        let bytesPerInternalFrame = internalChannels * MemoryLayout<Float>.size
-        var scratch = Array<Float>(repeating: 0, count: frames * internalChannels)
+        let bytesPerInternalFrame = Int(internalChannels) * MemoryLayout<Float>.size
+        var scratch = Array<Float>(repeating: 0, count: frames * Int(internalChannels))
 
         scratch.withUnsafeMutableBytes { rawBuffer in
             guard let scratchPtr = rawBuffer.bindMemory(to: Float.self).baseAddress else {
@@ -223,8 +223,8 @@ private extension OutputSink {
 
                 for frameIndex in 0..<framesProvided {
                     for channel in 0..<internalChannels {
-                        let sourceValue = scratchPtr[frameIndex * internalChannels + channel]
-                        let targetChannel = channelOffset + channel
+                        let sourceValue = scratchPtr[frameIndex * Int(internalChannels) + Int(channel)]
+                        let targetChannel = channelOffset + Int(channel)
                         if targetChannel < deviceChannels {
                             dest[frameIndex * deviceChannels + targetChannel] = sourceValue
                         }
@@ -233,7 +233,7 @@ private extension OutputSink {
 
                 bufferList[0].mDataByteSize = UInt32(framesProvided * deviceChannels * MemoryLayout<Float>.size)
             } else {
-                for channel in 0..<min(internalChannels, bufferList.count) {
+                for channel in 0..<min(Int(internalChannels), bufferList.count) {
                     let targetChannel = channelOffset + channel
                     guard targetChannel < bufferList.count,
                           let dest = bufferList[targetChannel].mData?.assumingMemoryBound(to: Float.self) else {
@@ -243,7 +243,7 @@ private extension OutputSink {
                     memset(dest, 0, frames * MemoryLayout<Float>.size)
 
                     for frameIndex in 0..<framesProvided {
-                        let sourceValue = scratchPtr[frameIndex * internalChannels + channel]
+                        let sourceValue = scratchPtr[frameIndex * Int(internalChannels) + channel]
                         dest[frameIndex] = sourceValue
                     }
 

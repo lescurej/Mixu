@@ -22,7 +22,7 @@ final class PluginNode {
 
     let id: UUID
     let descriptor: AudioPluginDescriptor
-    private(set) var channelCount: Int
+    private(set) var channelCount: UInt32
 
     private var effectChain: AudioEffectChain?
     private var inputRoutes: [UUID: InputRoute] = [:]

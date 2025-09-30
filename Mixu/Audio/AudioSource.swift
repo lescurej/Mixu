@@ -23,10 +23,7 @@ final class AudioSource {
 
     var routes: [UUID: Route] = [:]
     
-    // Logging
-    private var lastLogTime: CFAbsoluteTime = 0
-    private let logInterval: CFAbsoluteTime = 2.0 // Log every 2 seconds
-    private var totalFramesDispatched: Int = 0
+    
 
     init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat) throws {
         print(" AudioSource.init: uid=\(uid), deviceID=\(deviceID), channels=\(internalFormat.channelCount)")
@@ -73,8 +70,6 @@ final class AudioSource {
 
     private func dispatch(buffer: UnsafePointer<Float>, frames: Int, channelCount: Int) {
         guard frames > 0, channelCount > 0 else { return }
-        totalFramesDispatched += frames
-        
         lock.lock()
         let targets = Array(routes.values)
         lock.unlock()

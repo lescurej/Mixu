@@ -5,7 +5,7 @@
 //  Created by Johan Lescure on 15/09/2025.
 //
 
-import AVFoundation
+import AudioToolbox
 
 // MARK: - Formats
 struct StreamFormat {

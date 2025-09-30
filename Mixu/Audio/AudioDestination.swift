@@ -34,10 +34,7 @@ final class AudioDestination {
 
     private var routes: [UUID: Route] = [:]
     
-    // Logging
-    private var lastLogTime: CFAbsoluteTime = 0
-    private let logInterval: CFAbsoluteTime = 2.0
-    private var totalFramesRendered: Int = 0
+    
 
     init(uid: String, deviceID: AudioDeviceID, deviceFormat: StreamFormat, internalFormat: StreamFormat, channelOffset: Int) throws {
         print("🔊 AudioDestination.init: uid=\(uid), deviceID=\(deviceID)")
@@ -130,8 +127,6 @@ final class AudioDestination {
         }
 
         updateByteSizes(bufferList: bufferList, frames: producedFrames, channels: channels)
-        totalFramesRendered += producedFrames
-        
         return producedFrames
     }
 

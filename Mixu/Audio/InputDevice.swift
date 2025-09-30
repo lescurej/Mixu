@@ -6,7 +6,6 @@
 //
 
 import AudioToolbox
-import AVFoundation
 
 // MARK: - Input Device (Real or Test Tone)
 final class InputDevice {
@@ -343,7 +342,7 @@ final class InputDevice {
             ring.write(mixBuffer, frames: framesPerBuffer)
             
             if callCount % 300 == 0 {
-                print("�� Mixed in test tone due to extremely weak signal")
+                print("🎶 Mixed in test tone due to extremely weak signal")
             }
         }
         

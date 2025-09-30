@@ -60,7 +60,6 @@ struct EntitiesListView: View {
             List(devices, id: \.name, selection: $multiSelection) { d in
                 Text(d.name)
             }
-            //.toolbar { EditButton() }
             Divider()
         }
     }

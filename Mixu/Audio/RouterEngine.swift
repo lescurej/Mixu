@@ -1,6 +1,4 @@
-import AVFoundation
 import CoreAudio
-import os.log
 
 // MARK: - Audio Graph
 enum ConnectionEndpoint: Equatable {
@@ -246,7 +244,7 @@ class RouterEngine: ObservableObject {
             effects: effects
         )
 
-        let ring = AudioRingBuffer(capacityFrames: 4096)
+        let ring = AudioRingBuffer(capacityFrames: 4096, channels: Int(canonicalFormat.channelCount))
 
         switch (fromEndpoint, toEndpoint) {
         case let (.device(fromUID, fromDeviceID), .device(toUID, toDeviceID)):

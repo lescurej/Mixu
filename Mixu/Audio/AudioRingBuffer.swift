@@ -5,7 +5,7 @@
 //  Created by Johan Lescure on 15/09/2025.
 //
 
-import os.log
+ 
 
 /// Lock-based Ring Buffer (Swift 6 safe).
 /// Single-producer / single-consumer. Uses OSAllocatedUnfairLock.
@@ -43,9 +43,8 @@ final class AudioRingBuffer {
         }
         availableFrames = min(capacityFrames, availableFrames + frames)
         
-        // Debug: Log when audio data is written
         if frames > 0 {
-            print("�� Ring buffer: wrote \(frames) frames, fill level: \(Double(availableFrames) / Double(capacityFrames))")
+            print("🔁 Ring buffer: wrote \(frames) frames, fill level: \(Double(availableFrames) / Double(capacityFrames))")
         }
         
         lock.unlock()
@@ -80,7 +79,6 @@ final class AudioRingBuffer {
             memset(output.advanced(by: samplesToRead), 0, deficit * MemoryLayout<Float>.size)
         }
 
-        // Debug: Log when audio data is read
         if framesToRead > 0 {
             print("📖 Ring buffer: read \(framesToRead) frames, fill level: \(Double(availableFrames) / Double(capacityFrames))")
         }

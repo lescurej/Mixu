@@ -1,5 +1,4 @@
 import SwiftUI
-import AVFoundation
 import UniformTypeIdentifiers
 
 struct Connection: Identifiable, Hashable {
@@ -43,7 +42,7 @@ private extension PatchbayView {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 sidebarSection(
-                    title: "ENTRÉES",
+                    title: "INPUTS",
                     color: .blue,
                     items: availableInputs.map { SidebarItem(device: $0, type: .input) }
                 )
@@ -55,7 +54,7 @@ private extension PatchbayView {
                     )
                 }
                 sidebarSection(
-                    title: "SORTIES",
+                    title: "OUTPUTS",
                     color: .green,
                     items: availableOutputs.map { SidebarItem(device: $0, type: .output) }
                 )
@@ -169,7 +168,7 @@ private extension PatchbayView {
                 }
 
                 if placedBoxes.isEmpty {
-                    Text("Glissez-déposez des périphériques ici")
+                    Text("Drag and drop devices here")
                         .font(.callout)
                         .foregroundColor(.white.opacity(0.4))
                         .padding(12)

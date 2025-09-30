@@ -1,10 +1,8 @@
 import os.log
 import SwiftUI
-import AVFoundation
-import CoreAudio
 
 // MARK: - Logging
-let log = OSLog(subsystem: "com.example.LoopbackRouter", category: "audio")
+let log = OSLog(subsystem: "com.mixu.app", category: "audio")
 
 // MARK: - Helpers (Check OSStatus)
 @discardableResult

@@ -139,6 +139,7 @@ private extension PatchbayView {
                     }
 
                     if let from = draggingFrom, let start = portCenters[from] {
+                        print("🎨 Drawing cable: start=\(start), tempPoint=\(tempPoint)")
                         ctx.stroke(
                             curve(start, tempPoint),
                             with: .color(.orange),
@@ -147,6 +148,8 @@ private extension PatchbayView {
                     }
                 }
                 .allowsHitTesting(false)
+                .onChange(of: tempPoint) { _, _ in }
+                .onChange(of: draggingFrom) { _, _ in }
 
                 ForEach($placedBoxes) { $box in
                     DeviceBoxView(
@@ -156,6 +159,7 @@ private extension PatchbayView {
                         onDrag: { _, fromId, location in
                             draggingFrom = fromId
                             tempPoint = location
+                            print("🔄 Drag update: fromId=\(fromId), location=\(location)")
                         },
                         onRelease: { _, fromPortId, location in
                             handleConnectionDrop(fromId: fromPortId, location: location)

@@ -108,7 +108,6 @@ struct DeviceBoxView: View {
     private var boxDragGesture: some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named("patch"))
             .onChanged { value in
-                guard draggingFrom == nil else { return }
                 if dragStartPosition == nil {
                     dragStartPosition = device.position
                 }
@@ -119,7 +118,6 @@ struct DeviceBoxView: View {
                 }
             }
             .onEnded { value in
-                guard draggingFrom == nil else { dragStartPosition = nil; return }
                 if let start = dragStartPosition {
                     device.position = CGPoint(x: start.x + value.translation.width,
                                               y: start.y + value.translation.height)
@@ -148,7 +146,7 @@ struct PortView: View {
                 .fill(port.isInput ? .green : .blue)
                 .frame(width: hovered ? hoveredCircleSize : normalCircleSize , height: hovered ? hoveredCircleSize : normalCircleSize)
                 .position(
-                    x: port.isInput ? 0 : deviceSize.width ,
+                    x: port.isInput ? deviceSize.width : 0,
                     y: port.local.y
                 )
                 .onHover(perform: {hovered in self.hovered = hovered})

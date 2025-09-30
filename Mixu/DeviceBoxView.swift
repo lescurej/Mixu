@@ -73,11 +73,6 @@ struct DeviceBoxView: View {
                     RoundedRectangle(cornerRadius: portRadius)
                         .stroke(Color.white.opacity(0.1), lineWidth: 1)
                 )
-                .onDrag {
-                    let provider = NSItemProvider(object: NSString(string: device.id.uuidString))
-                    provider.suggestedName = device.name
-                    return provider
-                }
 
             // Name
             Text(device.name)
@@ -148,11 +143,20 @@ struct PortView: View {
                 .fill(port.isInput ? .green : .blue)
                 .frame(width: hovered ? hoveredCircleSize : normalCircleSize , height: hovered ? hoveredCircleSize : normalCircleSize)
                 .position(
-                    x: port.isInput ? deviceSize.width : 0 ,
+                    x: port.isInput ? 0 : deviceSize.width,
                     y: port.local.y
                 )
                 .onHover(perform: {hovered in self.hovered = hovered})
                 .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("patch"))
+                        .onChanged { value in
+                            onDrag(port.id, value.location)
+                        }
+                        .onEnded { value in
+                            onReleased(port.id, value.location)
+                        }
+                , including: .all)
+                .highPriorityGesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named("patch"))
                         .onChanged { value in
                             onDrag(port.id, value.location)
@@ -172,7 +176,7 @@ struct PortView: View {
                 .multilineTextAlignment(port.isInput ? .trailing : .leading )
                 .frame(width: 100.0)
                 .position(
-                    x: port.isInput ? deviceSize.width - 20 : 20,
+                    x: port.isInput ? 30 : deviceSize.width - 30,
                     y: port.local.y
                 )
         }

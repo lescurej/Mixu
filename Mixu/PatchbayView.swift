@@ -391,7 +391,10 @@ private extension PatchbayView {
             let originX = box.position.x - box.size.width / 2
             let originY = box.position.y - box.size.height / 2
             for port in box.ports {
-                let x = originX + (port.isInput ? box.size.width : 0)
+                // Match visual placement in DeviceBoxView.PortView:
+                // - Inputs on left edge
+                // - Outputs on right edge
+                let x = originX + (port.isInput ? 0 : box.size.width)
                 let y = originY + port.local.y
                 centers[port.id] = CGPoint(x: x, y: y)
             }

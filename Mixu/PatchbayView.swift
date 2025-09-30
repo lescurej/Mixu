@@ -24,7 +24,7 @@ struct PatchbayView: View {
     @State private var tempPoint: CGPoint = .zero
 
     @State private var isDropTargeted = false
-    @State private var patchSize: CGSize = .zero
+    @State private var patchSize: CGSize = CGSize(width: 2400, height: 1600)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -121,9 +121,10 @@ private extension PatchbayView {
     }
 
     var patchSurface: some View {
-        GeometryReader { geo in
-            let bounds = geo.size
-            ZStack {
+        ScrollView([.horizontal, .vertical], showsIndicators: true) {
+            GeometryReader { geo in
+                let bounds = geo.size
+                ZStack {
                 Color.black.opacity(0.82)
                     .overlay(
                         RoundedRectangle(cornerRadius: 18)
@@ -162,7 +163,7 @@ private extension PatchbayView {
                             draggingFrom = nil
                         },
                         onMove: { updated in
-                            updatePosition(for: updated, bounds: bounds)
+                            updatePosition(for: updated, bounds: patchSize)
                         }
                     )
                 }
@@ -173,28 +174,31 @@ private extension PatchbayView {
                         .foregroundColor(.white.opacity(0.4))
                         .padding(12)
                 }
-            }
-            .padding(16)
-            .coordinateSpace(name: "patch")
-            .onAppear {
-                updatePatchSizeIfNeeded(bounds)
-            }
-            .onChange(of: bounds) { _, newBounds in
-                updatePatchSizeIfNeeded(newBounds)
-            }
-            .onDrop(
-                of: [UTType.plainText],
-                delegate: SidebarDropDelegate(
-                    onHighlight: { isDropTargeted = $0 },
-                    perform: { identifier, location in
-                        handleSidebarDrop(identifier: identifier, location: location, bounds: bounds)
-                    }
+                }
+                .padding(16)
+                .coordinateSpace(name: "patch")
+                .onAppear {
+                    updatePatchSizeIfNeeded(bounds)
+                }
+                .onChange(of: bounds) { _, newBounds in
+                    updatePatchSizeIfNeeded(newBounds)
+                }
+                .onDrop(
+                    of: [UTType.plainText],
+                    delegate: SidebarDropDelegate(
+                        onHighlight: { isDropTargeted = $0 },
+                        perform: { identifier, location in
+                            handleSidebarDrop(identifier: identifier, location: location, bounds: patchSize)
+                        }
+                    )
                 )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18)
-                    .stroke(Color.blue.opacity(isDropTargeted ? 0.45 : 0), lineWidth: 2)
-            )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(Color.blue.opacity(isDropTargeted ? 0.45 : 0), lineWidth: 2)
+                )
+                .frame(width: max(patchSize.width, geo.size.width), height: max(patchSize.height, geo.size.height))
+            }
+            .frame(minWidth: patchSize.width, minHeight: patchSize.height)
         }
     }
 
@@ -407,12 +411,12 @@ private extension PatchbayView {
 
     func updatePatchSizeIfNeeded(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
-        guard patchSize != size else { return }
-
-        patchSize = size
+        let newSize = CGSize(width: max(size.width, patchSize.width), height: max(size.height, patchSize.height))
+        guard patchSize != newSize else { return }
+        patchSize = newSize
         placedBoxes = placedBoxes.map { box in
             var updated = box
-            updated.position = clampPosition(box.position, size: box.size, in: size)
+            updated.position = clampPosition(box.position, size: box.size, in: newSize)
             return updated
         }
         recomputePortCenters()
